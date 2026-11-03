@@ -30,3 +30,6 @@ class User(Base):
     roles: Mapped[list["Role"]] = relationship(
         secondary=user_roles, back_populates="users", lazy="selectin"
     )
+    shipments: Mapped[list["Shipment"]] = relationship(
+        back_populates="created_by", lazy="noload"
+    )

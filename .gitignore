@@ -24,6 +24,14 @@ Thumbs.db
 __pycache__/
 .venv/
 venv/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Backend local environment files
+backend/.env
+backend/.env.*
+!backend/.env.example
 
 # Test artifacts
 coverage/

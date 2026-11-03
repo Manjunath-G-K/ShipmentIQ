@@ -26,15 +26,15 @@ def test_migrations_created_schema() -> None:
         version = connection.scalar(text("SELECT version_num FROM alembic_version"))
 
     assert table_name == "alembic_version"
-    assert version == "0002_authentication"
+    assert version == "0003_shipments"
 
     with get_engine().connect() as connection:
         tables = {
             connection.scalar(text("SELECT to_regclass(:table_name)"), {"table_name": table})
-            for table in ("public.users", "public.roles", "public.user_roles")
+    for table in ("public.users", "public.roles", "public.user_roles", "public.shipments")
         }
 
-    assert tables == {"users", "roles", "user_roles"}
+    assert tables == {"users", "roles", "user_roles", "shipments"}
 
 
 def test_sqlalchemy_insert_and_retrieve_is_rollback_safe() -> None:

@@ -117,6 +117,7 @@ def test_invalid_credentials_and_invalid_input_are_rejected(auth_users) -> None:
         headers={"Origin": ORIGIN},
     )
     assert invalid_input.status_code == 422
+    assert '"input":"short"' not in invalid_input.text
 
 
 @pytest.mark.parametrize("token_value", ["not-a-jwt", "expired"])

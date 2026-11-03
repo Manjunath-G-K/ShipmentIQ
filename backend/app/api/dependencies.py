@@ -88,3 +88,16 @@ def require_role(required_role: RoleName) -> Callable:
         return user
 
     return dependency
+
+
+def require_any_role(*required_roles: RoleName) -> Callable:
+    """Build a dependency that accepts any one of the supplied roles."""
+
+    allowed = {role.value for role in required_roles}
+
+    def dependency(user: CurrentUser) -> User:
+        if not allowed.intersection(role.name for role in user.roles):
+            raise AuthorizationError()
+        return user
+
+    return dependency

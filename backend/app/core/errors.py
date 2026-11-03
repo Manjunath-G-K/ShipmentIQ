@@ -11,6 +11,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.schemas import ErrorBody, ErrorResponse
 
 
+_SENSITIVE_FIELD_NAMES = {
+    "password",
+    "password_hash",
+    "token",
+    "access_token",
+    "csrf_token",
+    "authorization",
+    "cookie",
+}
+
+
 class APIError(Exception):
     """An expected application error safe to expose to an API client."""
 
@@ -99,8 +110,50 @@ class DevelopmentOnlyEndpointError(APIError):
         )
 
 
+class ConflictError(APIError):
+    """The request conflicts with an existing resource."""
+
+    def __init__(self, message: str = "Resource already exists") -> None:
+        super().__init__(status_code=409, code="CONFLICT", message=message)
+
+
+class ShipmentNotFoundError(APIError):
+    """The shipment does not exist or is outside the caller's object scope."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=404,
+            code="SHIPMENT_NOT_FOUND",
+            message="Shipment not found",
+        )
+
+
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", str(uuid4()))
+
+
+def _safe_details(value: Any) -> Any:
+    """Convert validation context into JSON-safe, non-sensitive details."""
+
+    if isinstance(value, BaseException):
+        return str(value)
+    if isinstance(value, dict):
+        location = value.get("loc", [])
+        sensitive_location = any(
+            str(part).lower() in _SENSITIVE_FIELD_NAMES for part in location
+        )
+        return {
+            key: (
+                "[redacted]"
+                if str(key).lower() in _SENSITIVE_FIELD_NAMES
+                or (sensitive_location and str(key).lower() == "input")
+                else _safe_details(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_safe_details(item) for item in value]
+    return value
 
 
 def _error_response(
@@ -115,7 +168,7 @@ def _error_response(
         error=ErrorBody(
             code=code,
             message=message,
-            details=details,
+            details=_safe_details(details),
             request_id=_request_id(request),
         )
     )

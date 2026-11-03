@@ -370,7 +370,7 @@ erDiagram
 
 - **User, Role, UserRole:** authenticated identities and the two required roles, Documentation Executive and Documentation Manager. A user may have one or more roles so permissions remain extensible; the brief does not require additional roles.
 - **Supplier:** an optional normalized supplier reference used for per-supplier reporting. Supplier identity matching is unresolved, so automatic merging must not be assumed.
-- **Shipment:** the unit of work and owner of status, review progress, documents, validations, correction history, and export attempts.
+- **Shipment:** the unit of work and owner of status, review progress, documents, validations, correction history, and export attempts. The implemented shipment slice stores a unique reference, importer, supplier, origin country, description, creator, backend-controlled status, and timestamps.
 - **Document and DocumentPage:** source files and page-level readability state. Page state supports unreadable-page manual entry without discarding the original file.
 - **ExtractionRun:** one provider attempt over one shipment or document set, with lifecycle and provider metadata. A run is never an approval.
 - **ExtractedField:** a proposed value with field key, source document/page where available, confidence, and current review status. `value_json` keeps the provider response flexible while Pydantic validates the accepted structure. For the MVP, line items, packages, weights, and containers are typed collections under field keys rather than separate tables; this avoids unnecessary normalization while keeping the invoice-total calculation testable.
@@ -397,6 +397,8 @@ erDiagram
 - no client-provided status is accepted as authoritative for review, validation, or export;
 - shipment status is a backend-maintained projection updated by the state service whenever fields, reviews, validations, or exports change; no endpoint accepts an arbitrary status write.
 
+The implemented shipment migration enforces a unique `shipment_reference`, a required `created_by_id` foreign key to `users`, a finite status check constraint, and indexes for `(status, updated_at)` and `(created_by_id, updated_at)`. The current API normalizes references to uppercase before applying the uniqueness constraint.
+
 **Assumption:** One shipment can have more than one version or upload of a document. The implementation should retain versions rather than silently overwrite a source; the exact replacement UX is unresolved.
 
 ### Indexes
@@ -404,6 +406,7 @@ erDiagram
 **Proposed indexes:**
 
 - `shipment(status, updated_at)` for the shipment list;
+- `shipment(created_by_id, updated_at)` for executive object scoping;
 - `shipment(supplier_id, updated_at)` for supplier reporting;
 - `document(shipment_id, document_type, processing_status)`;
 - `document_page(document_id, page_number)`;
@@ -425,8 +428,9 @@ The following endpoints are **proposed**. All protected endpoints perform backen
 | POST | `/api/v1/auth/logout` | End the current session/token context | Authenticated |
 | GET | `/api/v1/auth/me` | Return current user and effective roles | Authenticated |
 | GET | `/api/v1/shipments` | Paginated shipment list with status/review progress filters | Executive, Manager |
-| POST | `/api/v1/shipments` | Create a shipment record | Executive, Manager if needed |
+| POST | `/api/v1/shipments` | Create a shipment record in `DRAFT` state | Documentation Executive (implemented) |
 | GET | `/api/v1/shipments/{shipment_id}` | Return shipment summary and current state | Authorized shipment user |
+| PATCH | `/api/v1/shipments/{shipment_id}` | Update shipment metadata without changing backend-managed status | Documentation Executive, own shipment (implemented) |
 | POST | `/api/v1/shipments/{shipment_id}/documents` | Validate and store an invoice, packing list, or bill of lading | Executive |
 | GET | `/api/v1/shipments/{shipment_id}/documents/{document_id}` | Return authorized document metadata | Authorized shipment user |
 | GET | `/api/v1/documents/{document_id}/content` | Stream or issue a short-lived authorized file response | Authorized shipment user |
@@ -447,6 +451,8 @@ The following endpoints are **proposed**. All protected endpoints perform backen
 **Unresolved:** Exact manager approval endpoints and permissions depend on the client’s unspecified approval rules. A review endpoint must not become a generic “override” endpoint without an explicit policy.
 
 There is intentionally no customs-portal endpoint, duty-calculation endpoint, HSN-classification endpoint, or importer portal endpoint.
+
+The implemented shipment slice currently exposes the list, create, detail, and metadata-update endpoints above. Documentation Executives are scoped to shipments they created; Documentation Managers can review all shipments in the application scope but cannot create or modify them. Shipment creation and updates use the existing cookie-authenticated CSRF and Origin protections.
 
 ## 9. Authentication and role-based access control
 
@@ -600,6 +606,8 @@ These state names are **proposed implementation states**, not additional client 
 | `READY_FOR_EXPORT` | Backend eligibility check currently passes | `EXPORTED`, `ACTION_REQUIRED` |
 | `EXPORTED` | A CSV was generated successfully for a specific reviewed snapshot | `ACTION_REQUIRED` and stale export artifact if a later correction affects the shipment |
 | `PROCESSING_FAILED` | A processing attempt failed and needs retry/manual action | `EXTRACTING`, `ACTION_REQUIRED` |
+
+The current shipment API creates records as `DRAFT` and does not expose a status-transition endpoint. Future document, extraction, review, validation, and export services must own transitions so clients cannot bypass workflow requirements.
 
 ### Field states
 
@@ -763,15 +771,17 @@ No Kubernetes, Kafka, Redis, worker runtime, or additional service mesh is propo
 
 The client brief gives a six-week implementation timeline and a separate take-home deadline of 9 November 2026, 11:59 PM IST. The following is a proposed priority sequence for the remaining assignment period; it is not an implementation claim.
 
+The FastAPI/PostgreSQL foundation, authentication/RBAC boundary, and the shipment management slice described in this document are implemented. The remaining slices below are planned work and are not implementation claims.
+
 ### Slice 1 — Foundation and security boundary
 
-- Create the FastAPI/React project layout, environment configuration, PostgreSQL session, Alembic baseline, and OpenAPI shell.
-- Implement sign-in, JWT verification, server-side role checks, and seeded Executive/Manager users using synthetic/demo credentials managed outside source control.
-- Create the minimum shipment/document/user schema and a shipment-list read path.
+- Completed: FastAPI/React project layout, environment configuration, PostgreSQL session, Alembic baseline, and OpenAPI shell.
+- Completed: sign-in, JWT verification, server-side role checks, and synthetic/demo user seeding outside source control.
+- Completed: authentication schema and the initial shipment management schema/list boundary.
 
 ### Slice 2 — Shipment intake and original-document access
 
-- Implement shipment creation, the three document types, upload validation, local storage abstraction, private file access, and shipment status/review progress.
+- Implement the three document types, upload validation, local storage abstraction, private file access, and shipment status/review progress.
 - Add loading, empty, and error states.
 - Seed SHP-24811 and SHP-24812 with the brief’s labelled synthetic data.
 

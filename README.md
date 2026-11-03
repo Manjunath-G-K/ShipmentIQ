@@ -8,27 +8,15 @@ Individual take-home engineering assignment.
 
 \## Status
 
-Problem statement selection pending.
+The current implemented milestone is the Shipment Management API backend foundation.
 
+It includes PostgreSQL development through Docker Compose, JWT cookie authentication with Argon2id password hashing, database-backed RBAC, shipment creation/list/detail/update APIs, object-level authorization, migrations, and PostgreSQL integration tests.
 
-
-\## Project Goals
-
-\- Understand the client requirements.
-
-\- Build a complete end-to-end product.
-
-\- Implement reliable backend and frontend workflows.
-
-\- Integrate functional AI or automation.
-
-\- Test, document and deploy the application.
-
-
+Shipment statuses are backend-controlled. Document upload, OCR, AI extraction, human review, validation, export, and frontend work are intentionally not implemented yet.
 
 \## Documentation
 
-\- Technical Design Document: docs/
+\- Backend setup and API behavior: backend/README.md
 
-\- Deployment Guide: deployment.md
+\- Architecture and requirements: docs/
 

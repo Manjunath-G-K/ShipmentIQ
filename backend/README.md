@@ -1,6 +1,6 @@
 # ShipmentIQ Backend
 
-Initial FastAPI foundation for the ShipmentIQ engineering take-home project.
+FastAPI backend for the ShipmentIQ engineering take-home project.
 
 This milestone includes:
 
@@ -11,10 +11,11 @@ This milestone includes:
 - liveness endpoint: `GET /api/v1/health`;
 - PostgreSQL readiness endpoint: `GET /api/v1/health/ready`;
 - cookie-based JWT authentication and server-side role checks;
+- shipment create, list, detail, and metadata-update endpoints with object-level authorization;
 - consistent JSON error responses with request IDs; and
-- Pytest coverage for health, configuration, and database-readiness behavior.
+- Pytest coverage for authentication, shipments, health, configuration, and PostgreSQL integration.
 
-No shipment, document, or AI business logic is included yet.
+Document upload, OCR, AI extraction, review, and export are not included yet.
 
 ## Prerequisites
 
@@ -102,7 +103,18 @@ python -m app.scripts.seed_demo_users
 
 The command is explicit and idempotent: it creates or reconciles the two synthetic users and required roles without printing passwords. Replace the example passwords with local-only values of at least eight characters.
 
-The foundation includes `/api/v1/auth/rbac/executive` and `/api/v1/auth/rbac/manager` as small protected RBAC boundary checks. They are verification endpoints for this milestone, not shipment functionality.
+The foundation includes `/api/v1/auth/rbac/executive` and `/api/v1/auth/rbac/manager` as small protected RBAC boundary checks. They are disabled in production and are not shipment functionality.
+
+## Shipment management
+
+The current shipment API provides:
+
+- `POST /api/v1/shipments` — Documentation Executive only; creates a `DRAFT` shipment;
+- `GET /api/v1/shipments` — Executive sees owned shipments, Manager sees all authorized shipments; supports `limit`, `offset`, and `status`;
+- `GET /api/v1/shipments/{shipment_id}` — object-scoped detail access; and
+- `PATCH /api/v1/shipments/{shipment_id}` — Executive-only update of shipment metadata they own.
+
+Shipment status is server-managed and cannot be supplied through create or update payloads. All cookie-authenticated state-changing requests require the configured Origin and CSRF header protections. Shipment references are normalized and unique.
 
 ## Health checks
 
@@ -121,7 +133,7 @@ After PostgreSQL is configured:
 alembic upgrade head
 ```
 
-The migrations create the Alembic version table plus the authentication tables (`users`, `roles`, and `user_roles`). Future milestones should add revisions for their own persistence models. Confirm the migration state with:
+The migrations create the Alembic version table, authentication tables (`users`, `roles`, and `user_roles`), and the `shipments` table. Future milestones should add revisions for their own persistence models. Confirm the migration state with:
 
 ```powershell
 alembic current
@@ -140,4 +152,4 @@ $env:RUN_DB_INTEGRATION = "1"
 pytest -q
 ```
 
-The integration test checks the migrated schema, performs an insert/retrieve in a transaction, and rolls the transaction back. The readiness behavior tests also verify HTTP 503 with a safe error payload when the database boundary reports that PostgreSQL is unavailable; the real database readiness check returns HTTP 200 when PostgreSQL is reachable.
+The integration tests check the migrated schema, shipment authorization and validation behavior, and a rollback-safe insert/retrieve transaction. The readiness behavior tests also verify HTTP 503 with a safe error payload when the database boundary reports that PostgreSQL is unavailable; the real database readiness check returns HTTP 200 when PostgreSQL is reachable.

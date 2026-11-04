@@ -33,3 +33,6 @@ class User(Base):
     shipments: Mapped[list["Shipment"]] = relationship(
         back_populates="created_by", lazy="noload"
     )
+    uploaded_documents: Mapped[list["ShipmentDocument"]] = relationship(
+        back_populates="uploaded_by", lazy="noload"
+    )

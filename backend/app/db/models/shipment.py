@@ -61,3 +61,6 @@ class Shipment(Base):
         onupdate=func.now(),
     )
     created_by: Mapped["User"] = relationship(back_populates="shipments")
+    documents: Mapped[list["ShipmentDocument"]] = relationship(
+        back_populates="shipment", lazy="noload"
+    )

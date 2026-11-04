@@ -12,10 +12,11 @@ This milestone includes:
 - PostgreSQL readiness endpoint: `GET /api/v1/health/ready`;
 - cookie-based JWT authentication and server-side role checks;
 - shipment create, list, detail, and metadata-update endpoints with object-level authorization;
+- private shipment document upload, list, and authorized download endpoints for invoices, packing lists, and bills of lading;
 - consistent JSON error responses with request IDs; and
 - Pytest coverage for authentication, shipments, health, configuration, and PostgreSQL integration.
 
-Document upload, OCR, AI extraction, review, and export are not included yet.
+OCR, AI extraction, review, and export are not included yet.
 
 ## Prerequisites
 
@@ -116,6 +117,16 @@ The current shipment API provides:
 
 Shipment status is server-managed and cannot be supplied through create or update payloads. All cookie-authenticated state-changing requests require the configured Origin and CSRF header protections. Shipment references are normalized and unique.
 
+## Shipment documents
+
+The document API provides:
+
+- `POST /api/v1/shipments/{shipment_id}/documents` — Documentation Executive only; accepts one `INVOICE`, `PACKING_LIST`, or `BILL_OF_LADING` upload;
+- `GET /api/v1/shipments/{shipment_id}/documents` — authorized shipment-scoped metadata list; and
+- `GET /api/v1/shipments/{shipment_id}/documents/{document_id}/download` — authorized private-file download.
+
+Uploads are limited by `DOCUMENT_MAX_SIZE_BYTES` (10 MiB by default), validated by file content as well as extension, and stored under `DOCUMENT_STORAGE_PATH` using generated names. The path is application-private and is not mounted as a public web directory. One document of each type is allowed per shipment. Executive users can only upload to their own shipments; managers can list and download documents for all shipments but cannot upload.
+
 ## Health checks
 
 ```powershell
@@ -133,7 +144,7 @@ After PostgreSQL is configured:
 alembic upgrade head
 ```
 
-The migrations create the Alembic version table, authentication tables (`users`, `roles`, and `user_roles`), and the `shipments` table. Future milestones should add revisions for their own persistence models. Confirm the migration state with:
+The migrations create the Alembic version table, authentication tables (`users`, `roles`, and `user_roles`), the `shipments` table, and the `shipment_documents` metadata table. Files remain outside PostgreSQL and are replaceable through the private storage adapter. Confirm the migration state with:
 
 ```powershell
 alembic current

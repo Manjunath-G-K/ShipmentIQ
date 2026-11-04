@@ -488,8 +488,8 @@ Authorization checks must cover shipment ownership/scope, document content, fiel
 
 1. The authorized Documentation Executive creates or opens a shipment record.
 2. The frontend sends the file through the authenticated FastAPI upload endpoint. The endpoint accepts the three required document categories—the commercial invoice, packing list, and bill of lading—and the supported input characteristics from the brief: PDFs, scans, or photographs.
-3. The backend validates the authenticated user, shipment access, declared document type, file metadata, and safe storage name. File-size, page-count, MIME-sniffing, and malware-scanning limits are unresolved and must be configured before production.
-4. The storage abstraction writes the source to a private local directory in development or private India-region object storage in deployment. The database stores an opaque storage key, checksum, document type, and processing state.
+3. The backend validates the authenticated user, shipment access, declared document type, file metadata, and safe storage name. The Milestone 6 implementation enforces a configurable 10 MiB default limit, supported extensions, declared content-type consistency, and shallow PDF/JPG/PNG content validation (including PDF EOF, PNG IHDR/CRC/dimensions, and JPEG markers). Page-count and malware scanning are not implemented.
+4. The storage abstraction writes the source to a private local directory in development or private India-region object storage in deployment. The Milestone 6 local adapter creates a private directory, uses generated opaque names, rejects path traversal/symlink storage keys, and stores an opaque storage key, checksum, document type, filename, size, and content type in PostgreSQL.
 5. The backend creates page records and an `ExtractionRun`, then invokes the provider through the extraction service with a bounded timeout. The response returns a truthful completed or failed/retryable state; it does not wait indefinitely.
 6. The extraction service persists validated output and updates document/shipment state in a transaction. A retry is an explicit new run and must be idempotent with respect to the selected document versions.
 7. Each failure is persisted with an actionable status. The original document is retained for review; an unreadable page becomes a manual-entry task rather than an invented value.
@@ -500,7 +500,7 @@ Authorization checks must cover shipment ownership/scope, document content, fiel
 - **Proposed:** Keep the storage interface small: put, get/stream, delete/retire, checksum, and authorized access.
 - **Confirmed:** Local development storage is allowed by the proposed stack; production hosting must meet the India-hosting and confidentiality constraints.
 - **Assumption:** Documents are retained for review and audit, but retention duration and deletion policy are unresolved.
-- **Proposed:** Never overwrite a source object in place. New uploads create a new document version or record and preserve the prior record.
+- **Milestone 6 implementation:** A shipment accepts at most one document of each supported type; concurrent duplicate uploads are serialized by the database uniqueness constraint and the losing file is cleaned up. Versioning/replacement remains a future policy decision rather than an implied behavior.
 
 ## 11. AI extraction workflow, structured output validation and confidence handling
 
@@ -781,7 +781,8 @@ The FastAPI/PostgreSQL foundation, authentication/RBAC boundary, and the shipmen
 
 ### Slice 2 — Shipment intake and original-document access
 
-- Implement the three document types, upload validation, local storage abstraction, private file access, and shipment status/review progress.
+- Completed for Milestone 6: the three document types, upload validation, local storage abstraction, private authorized file access, duplicate protection, and document metadata migration.
+- Shipment status/review progress, extraction, and UI states remain future work; document upload does not claim OCR or AI processing.
 - Add loading, empty, and error states.
 - Seed SHP-24811 and SHP-24812 with the brief’s labelled synthetic data.
 

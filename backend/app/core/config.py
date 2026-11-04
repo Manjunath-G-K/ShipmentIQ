@@ -1,6 +1,7 @@
 """Environment-backed application settings."""
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -68,6 +69,14 @@ class Settings(BaseSettings):
     demo_manager_password: str | None = Field(
         default=None, validation_alias="DEMO_MANAGER_PASSWORD"
     )
+    document_storage_path: Path = Field(
+        default=Path("private_storage/documents"),
+        validation_alias="DOCUMENT_STORAGE_PATH",
+    )
+    document_max_size_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        validation_alias="DOCUMENT_MAX_SIZE_BYTES",
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -104,6 +113,27 @@ class Settings(BaseSettings):
     def require_allowed_origin(cls, value: str) -> str:
         if not {origin.strip() for origin in value.split(",") if origin.strip()}:
             raise ValueError("AUTH_ALLOWED_ORIGINS must contain at least one origin")
+        return value
+
+    @field_validator("document_max_size_bytes")
+    @classmethod
+    def require_positive_document_size(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("DOCUMENT_MAX_SIZE_BYTES must be greater than zero")
+        return value
+
+    @field_validator("document_storage_path")
+    @classmethod
+    def require_private_document_path(cls, value: Path) -> Path:
+        public_directory_names = {"public", "static", "www", "wwwroot"}
+        resolved_value = value.expanduser().resolve(strict=False)
+        if any(
+            part.casefold() in public_directory_names
+            for part in resolved_value.parts
+        ):
+            raise ValueError(
+                "DOCUMENT_STORAGE_PATH must not be inside a public web directory"
+            )
         return value
 
     @model_validator(mode="after")

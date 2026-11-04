@@ -128,6 +128,35 @@ class ShipmentNotFoundError(APIError):
         )
 
 
+class DocumentNotFoundError(APIError):
+    """The document does not exist or is outside the caller's object scope."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=404,
+            code="DOCUMENT_NOT_FOUND",
+            message="Document not found",
+        )
+
+
+class InvalidDocumentUploadError(APIError):
+    """The uploaded document is not an allowed, validated document."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(status_code=422, code="INVALID_DOCUMENT", message=message)
+
+
+class DocumentStorageUnavailableError(APIError):
+    """Private document storage could not complete the requested operation."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=503,
+            code="DOCUMENT_STORAGE_UNAVAILABLE",
+            message="Document storage is unavailable",
+        )
+
+
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", str(uuid4()))
 

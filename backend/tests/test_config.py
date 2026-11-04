@@ -45,3 +45,14 @@ def test_production_requires_secure_auth_cookie(monkeypatch) -> None:
 
     with pytest.raises(ValidationError, match="AUTH_COOKIE_SECURE"):
         Settings(_env_file=None)
+
+
+def test_document_storage_rejects_public_web_directory(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg://user:password@localhost:5432/shipmentiq",
+    )
+    monkeypatch.setenv("DOCUMENT_STORAGE_PATH", "static/documents")
+
+    with pytest.raises(ValidationError, match="public web directory"):
+        Settings(_env_file=None)

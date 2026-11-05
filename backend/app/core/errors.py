@@ -157,6 +157,24 @@ class DocumentStorageUnavailableError(APIError):
         )
 
 
+class ExtractionNotFoundError(APIError):
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=404,
+            code="EXTRACTION_NOT_FOUND",
+            message="No extraction result exists for this document",
+        )
+
+
+class ExtractionConflictError(APIError):
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=409,
+            code="EXTRACTION_IN_PROGRESS",
+            message="Extraction is already in progress for this document",
+        )
+
+
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", str(uuid4()))
 

@@ -77,6 +77,27 @@ class Settings(BaseSettings):
         default=10 * 1024 * 1024,
         validation_alias="DOCUMENT_MAX_SIZE_BYTES",
     )
+    ocr_provider: Literal["local"] = Field(
+        default="local", validation_alias="OCR_PROVIDER"
+    )
+    extraction_ai_provider: Literal["local", "openai_compatible"] = Field(
+        default="local", validation_alias="EXTRACTION_AI_PROVIDER"
+    )
+    extraction_ai_api_url: str | None = Field(
+        default=None, validation_alias="EXTRACTION_AI_API_URL"
+    )
+    extraction_ai_api_key: str | None = Field(
+        default=None, validation_alias="EXTRACTION_AI_API_KEY"
+    )
+    extraction_ai_model: str = Field(
+        default="configured-model", validation_alias="EXTRACTION_AI_MODEL"
+    )
+    extraction_ai_timeout_seconds: int = Field(
+        default=60, validation_alias="EXTRACTION_AI_TIMEOUT_SECONDS"
+    )
+    extraction_low_confidence_threshold: float = Field(
+        default=0.80, validation_alias="EXTRACTION_LOW_CONFIDENCE_THRESHOLD"
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -120,6 +141,20 @@ class Settings(BaseSettings):
     def require_positive_document_size(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("DOCUMENT_MAX_SIZE_BYTES must be greater than zero")
+        return value
+
+    @field_validator("extraction_ai_timeout_seconds")
+    @classmethod
+    def require_positive_extraction_timeout(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("EXTRACTION_AI_TIMEOUT_SECONDS must be greater than zero")
+        return value
+
+    @field_validator("extraction_low_confidence_threshold")
+    @classmethod
+    def require_confidence_threshold(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("EXTRACTION_LOW_CONFIDENCE_THRESHOLD must be between 0 and 1")
         return value
 
     @field_validator("document_storage_path")

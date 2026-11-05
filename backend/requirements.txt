@@ -10,3 +10,7 @@ pydantic-settings==2.7.1
 pytest==8.3.4
 sqlalchemy==2.0.37
 uvicorn==0.34.0
+pypdf==5.1.0
+Pillow==11.1.0
+pytesseract==0.3.13
+PyMuPDF==1.25.3

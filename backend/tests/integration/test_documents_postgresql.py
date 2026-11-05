@@ -2,6 +2,7 @@
 
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,10 +11,23 @@ from sqlalchemy import delete, select
 
 from app.core.config import get_settings
 from app.core.security import hash_password
-from app.db.models import Role, RoleName, Shipment, ShipmentDocument, User
+from app.db.models import DocumentExtraction, Role, RoleName, Shipment, ShipmentDocument, ShipmentValidation, User
 from app.db.session import get_session_factory
 from app.main import app
 from app.modules.documents.storage import PrivateFileStorage
+from app.modules.extraction.api import get_ai_provider, get_ocr_provider
+from app.modules.extraction.schemas import (
+    ExtractionResult,
+    ExtractedDecimal,
+    ExtractedDate,
+    ExtractedInteger,
+    ExtractedString,
+    InvoiceFields,
+    LineItem,
+    OCRPage,
+    PartyFields,
+    ShipmentFields,
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -89,6 +103,11 @@ def document_users():
             )
             for document in documents:
                 storage.delete(document.storage_key)
+            cleanup.execute(
+                delete(ShipmentValidation).where(
+                    ShipmentValidation.shipment_id.in_(shipment_ids)
+                )
+            )
             cleanup.execute(delete(ShipmentDocument).where(ShipmentDocument.shipment_id.in_(shipment_ids)))
             cleanup.execute(delete(Shipment).where(Shipment.created_by_id.in_(user_ids)))
             cleanup.execute(delete(User).where(User.id.in_(user_ids)))
@@ -280,3 +299,248 @@ def test_concurrent_duplicate_uploads_are_serialized_by_database(document_users)
     assert len(listed.json()["items"]) == 1
     files_after = {path.name for path in storage.base_path.glob("*") if path.is_file()}
     assert len(files_after - files_before) == 1
+
+
+def test_extraction_result_and_status_are_persisted(document_users) -> None:
+    class FakeOCR:
+        name = "fake-ocr"
+
+        def extract(self, content: bytes, content_type: str):
+            return [OCRPage(page=1, text="synthetic", readable=True, source="embedded_text")]
+
+    class FakeAI:
+        name = "fake-ai"
+
+        def extract(self, pages, document_type):
+            return ExtractionResult(
+                document_type=document_type,
+                pages=pages,
+                parties=PartyFields(
+                    importer=ExtractedString(value="Synthetic Importer", confidence=0.95, sources=[{"page": 1, "locator": "label:importer"}]),
+                    supplier=ExtractedString(value="Synthetic Supplier", confidence=0.95, sources=[{"page": 1, "locator": "label:supplier"}]),
+                ),
+            )
+
+    app.dependency_overrides[get_ocr_provider] = lambda: FakeOCR()
+    app.dependency_overrides[get_ai_provider] = lambda: FakeAI()
+    try:
+        client = TestClient(app)
+        assert login(client, document_users["executive_email"], EXECUTIVE_PASSWORD).status_code == 200
+        shipment_id = create_shipment(client)
+        upload = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents",
+            data={"document_type": "INVOICE"},
+            files={"file": ("invoice.pdf", PDF, "application/pdf")},
+            headers=protected_write_headers(client),
+        )
+        assert upload.status_code == 201
+        document_id = upload.json()["id"]
+
+        extracted = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents/{document_id}/extract",
+            headers=protected_write_headers(client),
+        )
+        assert extracted.status_code == 200
+        assert extracted.json()["status"] == "NEEDS_REVIEW"
+        assert extracted.json()["result"]["pages"][0]["page"] == 1
+        assert extracted.json()["result"]["parties"]["supplier"]["sources"][0]["page"] == 1
+
+        session = get_session_factory()()
+        try:
+            persisted = session.scalar(select(DocumentExtraction).where(DocumentExtraction.document_id == UUID(document_id)))
+            assert persisted is not None
+            assert persisted.status == "NEEDS_REVIEW"
+            assert persisted.result["parties"]["supplier"]["value"] == "Synthetic Supplier"
+        finally:
+            session.close()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_review_corrections_revisions_and_validation_staleness(document_users) -> None:
+    class FakeOCR:
+        name = "fake-ocr"
+
+        def extract(self, content: bytes, content_type: str):
+            return [OCRPage(page=1, text="synthetic", readable=True, source="embedded_text")]
+
+    def extracted(value, confidence=0.95):
+        return {"value": value, "confidence": confidence, "sources": [{"page": 1, "locator": "synthetic"}]}
+
+    class FakeAI:
+        name = "fake-ai"
+
+        def extract(self, pages, document_type):
+            return ExtractionResult(
+                document_type=document_type,
+                pages=pages,
+                parties=PartyFields(
+                    importer=ExtractedString(**extracted("Synthetic Importer")),
+                    supplier=ExtractedString(**extracted("Synthetic Supplier")),
+                ),
+                invoice=InvoiceFields(
+                    number=ExtractedString(**extracted("INV-EXPORT-1")),
+                    date=ExtractedDate(**extracted(date(2026, 11, 5))),
+                    currency=ExtractedString(**extracted("USD")),
+                    incoterm=ExtractedString(**extracted("FOB")),
+                    total=ExtractedDecimal(**extracted("16.32")),
+                ),
+                line_items=[
+                    LineItem(
+                        description=ExtractedString(**extracted("Synthetic item")),
+                        quantity=ExtractedDecimal(**extracted("2")),
+                        unit_price=ExtractedDecimal(**extracted("8.16")),
+                    )
+                ],
+                shipment=ShipmentFields(
+                    packages=ExtractedInteger(**extracted(10)),
+                    gross_weight_kg=ExtractedDecimal(**extracted("100")),
+                    net_weight_kg=ExtractedDecimal(**extracted("90")),
+                ),
+            )
+
+    app.dependency_overrides[get_ocr_provider] = lambda: FakeOCR()
+    app.dependency_overrides[get_ai_provider] = lambda: FakeAI()
+    try:
+        client = TestClient(app)
+        manager = TestClient(app)
+        assert login(client, document_users["executive_email"], EXECUTIVE_PASSWORD).status_code == 200
+        assert login(manager, document_users["manager_email"], MANAGER_PASSWORD).status_code == 200
+        shipment_id = create_shipment(client)
+        document_ids = {}
+        for document_type, filename in (("INVOICE", "invoice.pdf"), ("PACKING_LIST", "packing.pdf"), ("BILL_OF_LADING", "bol.pdf")):
+            uploaded = client.post(
+                f"/api/v1/shipments/{shipment_id}/documents",
+                data={"document_type": document_type},
+                files={"file": (filename, PDF, "application/pdf")},
+                headers=protected_write_headers(client),
+            )
+            assert uploaded.status_code == 201
+            document_id = uploaded.json()["id"]
+            document_ids[document_type] = document_id
+            extracted_response = client.post(
+                f"/api/v1/shipments/{shipment_id}/documents/{document_id}/extract",
+                headers=protected_write_headers(client),
+            )
+            assert extracted_response.status_code == 200
+
+        review = client.get(f"/api/v1/shipments/{shipment_id}/review")
+        assert review.status_code == 200
+        packing = next(item for item in review.json()["documents"] if item["document_type"] == "PACKING_LIST")
+        gross_field = next(item for item in packing["fields"] if item["field_path"] == "shipment.gross_weight_kg")
+        invoice = next(item for item in review.json()["documents"] if item["document_type"] == "INVOICE")
+        invoice_number = next(item for item in invoice["fields"] if item["field_path"] == "invoice.number")
+
+        checks = client.post(
+            f"/api/v1/shipments/{shipment_id}/validations/run",
+            headers=protected_write_headers(client),
+        )
+        assert checks.status_code == 200
+        assert all(item["status"] == "PASSED" for item in checks.json()["validations"])
+
+        concurrent_clients = [TestClient(app), TestClient(app)]
+        for concurrent_client in concurrent_clients:
+            assert login(
+                concurrent_client,
+                document_users["executive_email"],
+                EXECUTIVE_PASSWORD,
+            ).status_code == 200
+
+        first_confirm = concurrent_clients[0].post(
+            f"/api/v1/fields/{gross_field['id']}/confirm",
+            json={"expected_version": gross_field["version"]},
+            headers=protected_write_headers(concurrent_clients[0]),
+        )
+        stale_confirm = concurrent_clients[1].post(
+            f"/api/v1/fields/{gross_field['id']}/confirm",
+            json={"expected_version": gross_field["version"]},
+            headers=protected_write_headers(concurrent_clients[1]),
+        )
+        assert first_confirm.status_code == 200
+        assert stale_confirm.status_code == 409
+
+        for document in review.json()["documents"]:
+            for field in document["fields"]:
+                if field["value"] is not None and field["id"] != gross_field["id"]:
+                    confirmed_field = client.post(
+                        f"/api/v1/fields/{field['id']}/confirm",
+                        json={"expected_version": field["version"]},
+                        headers=protected_write_headers(client),
+                    )
+                    assert confirmed_field.status_code == 200
+        eligible = client.get(f"/api/v1/shipments/{shipment_id}/export-eligibility")
+        assert eligible.status_code == 200
+        assert eligible.json()["eligible"] is True
+        exported = client.post(
+            f"/api/v1/shipments/{shipment_id}/exports",
+            headers=protected_write_headers(client),
+        )
+        assert exported.status_code == 200
+        assert "shipment_reference" in exported.text
+        assert "Synthetic item" in exported.text
+
+        corrected = client.patch(
+            f"/api/v1/fields/{gross_field['id']}",
+            json={"value": "101", "note": "Synthetic correction", "expected_version": 2},
+            headers=protected_write_headers(client),
+        )
+        assert corrected.status_code == 200
+        assert corrected.json()["status"] == "CORRECTED"
+        assert corrected.json()["version"] == 3
+        stale = client.get(f"/api/v1/shipments/{shipment_id}/validations")
+        assert stale.status_code == 200
+        assert all(item["status"] == "STALE" for item in stale.json())
+        stale_eligibility = client.get(f"/api/v1/shipments/{shipment_id}/export-eligibility")
+        assert stale_eligibility.status_code == 200
+        assert stale_eligibility.json()["eligible"] is False
+        assert any(
+            item["code"] == "VALIDATION_NOT_PASSED"
+            for item in stale_eligibility.json()["blockers"]
+        )
+
+        rerun = client.post(
+            f"/api/v1/shipments/{shipment_id}/validations/run",
+            headers=protected_write_headers(client),
+        )
+        assert rerun.status_code == 200
+        gross_check = next(item for item in rerun.json()["validations"] if item["rule_key"] == "gross_weight_across_documents")
+        assert gross_check["status"] == "FAILED"
+        assert gross_check["details"]["comparison"] == "different"
+
+        confirmed = client.post(
+            f"/api/v1/fields/{gross_field['id']}/confirm",
+            json={"expected_version": 3},
+            headers=protected_write_headers(client),
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["status"] == "CONFIRMED"
+
+        rejected = client.post(
+            f"/api/v1/fields/{invoice_number['id']}/reject",
+            json={"note": "Not present in synthetic source", "expected_version": 2},
+            headers=protected_write_headers(client),
+        )
+        assert rejected.status_code == 200
+        assert rejected.json()["status"] == "REJECTED"
+        blocked = client.get(f"/api/v1/shipments/{shipment_id}/export-eligibility")
+        assert blocked.status_code == 200
+        assert blocked.json()["eligible"] is False
+        assert any(item["code"] == "REJECTED_FIELD" for item in blocked.json()["blockers"])
+        blocked_export = client.post(
+            f"/api/v1/shipments/{shipment_id}/exports",
+            headers=protected_write_headers(client),
+        )
+        assert blocked_export.status_code == 409
+        assert blocked_export.json()["error"]["code"] == "EXPORT_BLOCKED"
+
+        revisions = client.get(f"/api/v1/fields/{gross_field['id']}/revisions")
+        assert revisions.status_code == 200
+        assert [item["action"] for item in revisions.json()] == ["EXTRACTED", "CONFIRMED", "CORRECTED", "CONFIRMED"]
+
+        report = manager.get("/api/v1/reports/accuracy")
+        assert report.status_code == 200
+        supplier = next(item for item in report.json()["supplier_metrics"] if item["key"] == "Synthetic Supplier GmbH")
+        assert supplier["corrected_count"] >= 1
+        assert supplier["rejected_count"] >= 1
+    finally:
+        app.dependency_overrides.clear()

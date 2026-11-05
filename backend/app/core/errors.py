@@ -1,7 +1,7 @@
 """Consistent application exception and HTTP error handling."""
 
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -189,6 +189,16 @@ class InvalidFieldValueError(APIError):
         super().__init__(status_code=422, code="INVALID_FIELD_VALUE", message=message)
 
 
+class ExportBlockedError(APIError):
+    def __init__(self, blockers: list[dict]) -> None:
+        super().__init__(
+            status_code=409,
+            code="EXPORT_BLOCKED",
+            message="Export is blocked until all review and validation issues are resolved",
+            details={"blockers": blockers},
+        )
+
+
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", str(uuid4()))
 
@@ -197,6 +207,8 @@ def _safe_details(value: Any) -> Any:
     """Convert validation context into JSON-safe, non-sensitive details."""
 
     if isinstance(value, BaseException):
+        return str(value)
+    if isinstance(value, UUID):
         return str(value)
     if isinstance(value, dict):
         location = value.get("loc", [])

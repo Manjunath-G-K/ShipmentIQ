@@ -1,6 +1,6 @@
 # ShipmentIQ Technical Design Document
 
-GitHub URL: Not provided in this workspace.
+GitHub URL: https://github.com/Manjunath-G-K/isocode-engineering-challenge
 
 Live application URL: Not deployed.
 

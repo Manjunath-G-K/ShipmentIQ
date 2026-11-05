@@ -1,6 +1,6 @@
 # ShipmentIQ deployment and review runbook
 
-GitHub URL: Not provided in this workspace.
+GitHub URL: https://github.com/Manjunath-G-K/isocode-engineering-challenge
 
 Live application URL: Not deployed.
 
@@ -52,6 +52,14 @@ This runbook describes the reproducible local/demo deployment. It does not claim
    ```
 
    Password values are intentionally not documented or committed. The reviewer credentials are the values supplied through those environment variables.
+
+   Working synthetic demo login details:
+
+   - Documentation Executive: `executive@example.test`
+   - Documentation Manager: `manager@example.test`
+   - Passwords: choose local values of at least eight characters for `DEMO_EXECUTIVE_PASSWORD` and `DEMO_MANAGER_PASSWORD`; the repository contains no shared or published password.
+
+   After seeding, use the executive account for shipment creation, document upload, correction, and provisional CSV export. Use the manager account for cross-document review, validation, revision history, and accuracy reporting. Server-side RBAC remains authoritative.
 
 6. Seed the labelled synthetic demo shipments and documents:
 

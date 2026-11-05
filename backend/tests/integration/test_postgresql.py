@@ -26,7 +26,7 @@ def test_migrations_created_schema() -> None:
         version = connection.scalar(text("SELECT version_num FROM alembic_version"))
 
     assert table_name == "alembic_version"
-    assert version == "0004_shipment_documents"
+    assert version == "0006_review_validation"
 
     with get_engine().connect() as connection:
         tables = {

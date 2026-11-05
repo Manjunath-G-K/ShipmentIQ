@@ -175,6 +175,20 @@ class ExtractionConflictError(APIError):
         )
 
 
+class ReviewFieldNotFoundError(APIError):
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=404,
+            code="REVIEW_FIELD_NOT_FOUND",
+            message="Review field not found",
+        )
+
+
+class InvalidFieldValueError(APIError):
+    def __init__(self, message: str) -> None:
+        super().__init__(status_code=422, code="INVALID_FIELD_VALUE", message=message)
+
+
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", str(uuid4()))
 

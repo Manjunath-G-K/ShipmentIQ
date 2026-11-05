@@ -13,10 +13,12 @@ This milestone includes:
 - cookie-based JWT authentication and server-side role checks;
 - shipment create, list, detail, and metadata-update endpoints with object-level authorization;
 - private shipment document upload, list, and authorized download endpoints for invoices, packing lists, and bills of lading;
+- provider-neutral OCR and structured extraction endpoints with multi-page provenance, field confidence, and PostgreSQL-backed processing status;
+- deterministic cross-document validation, human review actions, field revision history, and manager accuracy reports;
 - consistent JSON error responses with request IDs; and
 - Pytest coverage for authentication, shipments, health, configuration, and PostgreSQL integration.
 
-OCR, AI extraction, review, and export are not included yet.
+The React review UI is in `frontend/`. Customs filing is not included. Extraction is proposed data only and never approves or verifies a shipment.
 
 ## Prerequisites
 
@@ -104,6 +106,8 @@ python -m app.scripts.seed_demo_users
 
 The command is explicit and idempotent: it creates or reconciles the two synthetic users and required roles without printing passwords. Replace the example passwords with local-only values of at least eight characters.
 
+To seed the labelled synthetic reviewer workflow after migrations and demo users are ready, run `python -m app.scripts.seed_demo_data`. This creates or verifies `SHP-24811` with the required 45 kg invoice/packing-list discrepancy and `SHP-24812` as an invoice-only sample. It is disabled in production and does not contain real credentials or personal data.
+
 The foundation includes `/api/v1/auth/rbac/executive` and `/api/v1/auth/rbac/manager` as small protected RBAC boundary checks. They are disabled in production and are not shipment functionality.
 
 ## Shipment management
@@ -124,8 +128,34 @@ The document API provides:
 - `POST /api/v1/shipments/{shipment_id}/documents` — Documentation Executive only; accepts one `INVOICE`, `PACKING_LIST`, or `BILL_OF_LADING` upload;
 - `GET /api/v1/shipments/{shipment_id}/documents` — authorized shipment-scoped metadata list; and
 - `GET /api/v1/shipments/{shipment_id}/documents/{document_id}/download` — authorized private-file download.
+- `POST /api/v1/shipments/{shipment_id}/documents/{document_id}/extract` — authorized OCR and structured extraction; returns `NEEDS_REVIEW` for missing/unreadable values.
+- `GET /api/v1/shipments/{shipment_id}/documents/{document_id}/extraction` — authorized persisted extraction result/status.
 
 Uploads are limited by `DOCUMENT_MAX_SIZE_BYTES` (10 MiB by default), validated by file content as well as extension, and stored under `DOCUMENT_STORAGE_PATH` using generated names. The path is application-private and is not mounted as a public web directory. One document of each type is allowed per shipment. Executive users can only upload to their own shipments; managers can list and download documents for all shipments but cannot upload.
+
+## OCR and extraction providers
+
+The default `OCR_PROVIDER=local` uses `pypdf` for embedded text and local Tesseract OCR through PyMuPDF/Pillow for scanned PDF pages and JPG/PNG files. Install the Tesseract executable separately and keep its language data local; an unreadable page remains visible as `NEEDS_REVIEW` rather than receiving invented values. The default `EXTRACTION_AI_PROVIDER=local` is a free, conservative labelled-text parser that only accepts explicitly labelled values. An OpenAI-compatible provider can be selected only with `EXTRACTION_AI_PROVIDER=openai_compatible`, `EXTRACTION_AI_API_URL`, and `EXTRACTION_AI_API_KEY` configured. No API key or paid provider is required for the default path.
+
+Every accepted value carries a confidence score and page/locator source references. Provider responses are rejected if they fail the strict Pydantic extraction schema; failures are persisted as `FAILED` with a safe error code. A successful extraction with missing values or unreadable pages is `NEEDS_REVIEW` and never changes a shipment to an approval/export state.
+
+## Validation and human review
+
+Part 2 provides:
+
+- `GET /api/v1/shipments/{shipment_id}/review` for document fields, confidence/source data, and missing, unreadable, low-confidence, rejected, or unconfirmed flags;
+- `POST /api/v1/shipments/{shipment_id}/validations/run` and `GET /api/v1/shipments/{shipment_id}/validations` for invoice total versus line items, package counts, and gross/net-weight comparisons;
+- `PATCH /api/v1/fields/{field_id}` for executive corrections/manual entry;
+- `POST /api/v1/fields/{field_id}/confirm`, `POST /api/v1/fields/{field_id}/reject`, and `GET /api/v1/fields/{field_id}/revisions` for human decisions and append-only actor/timestamp history; and
+- `GET /api/v1/reports/accuracy` for manager-only field and shipment-supplier metrics.
+
+Comparisons with fewer than two available document values remain `UNRESOLVED`. Numeric comparisons use exact normalized values because the brief does not supply tolerances. Any correction or rejection marks prior validation results `STALE`; validation must be explicitly rerun. Accuracy is transparent and conservative: confirmed fields without a correction count as correct, corrected fields count as incorrect initial extraction, and rejected fields count as incorrect; unresolved/unreviewed fields are excluded.
+
+## Provisional CSV export
+
+Part 3 exposes `GET /api/v1/shipments/{shipment_id}/export-eligibility` for executive/manager review and `POST /api/v1/shipments/{shipment_id}/exports` for Documentation Executive export. Eligibility is enforced in the backend and requires an invoice, completed/readable extraction, present required fields, no rejected or low-confidence populated fields, human confirmation of populated fields, and every deterministic validation rule in `PASSED` state. Missing, failed, unresolved, stale, rejected, or low-confidence data blocks the export; the frontend cannot bypass this gate.
+
+The client's actual filing-software template was not supplied, so the current CSV is explicitly provisional. It has one row per invoice line item and these columns: `shipment_reference`, `importer`, `supplier`, `origin_country`, `invoice_number`, `invoice_date`, `currency`, `incoterm`, `invoice_total`, `item_description`, `quantity`, `unit_price`, `hsn_code`, `packages`, `gross_weight_kg`, `net_weight_kg`, and `containers`. No customs filing or automatic approval is performed. The CSV response marks the shipment `EXPORTED`; it does not add a separate export-attempt table or migration.
 
 ## Health checks
 
@@ -144,7 +174,7 @@ After PostgreSQL is configured:
 alembic upgrade head
 ```
 
-The migrations create the Alembic version table, authentication tables (`users`, `roles`, and `user_roles`), the `shipments` table, and the `shipment_documents` metadata table. Files remain outside PostgreSQL and are replaceable through the private storage adapter. Confirm the migration state with:
+The migrations create the Alembic version table, authentication tables (`users`, `roles`, and `user_roles`), the `shipments` table, the `shipment_documents` metadata table, document extraction results, and review/validation/revision tables through migration `0006_review_validation`. Files remain outside PostgreSQL and are replaceable through the private storage adapter. Confirm the migration state with:
 
 ```powershell
 alembic current

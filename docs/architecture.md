@@ -51,8 +51,8 @@ The main modules are:
 | ORM/migrations | SQLAlchemy 2.x and Alembic | Explicit relational mapping and migration history | More setup than a thin query layer, but appropriate for correction/audit relationships |
 | Processing | Synchronous FastAPI extraction for the MVP; optional database-backed jobs later | Simplest reliable path for a controlled take-home demo; keeps failures visible in the request result | A slow provider can exceed request limits; add the optional worker only when measured latency or retry needs justify it |
 | Frontend | React + TypeScript + Vite | Fits the desktop review UI and keeps frontend/backend independently testable | Requires a small API client and build/deployment integration |
-| Styling | Tailwind CSS | Efficient for a restrained enterprise interface and responsive states | Design tokens and component conventions must prevent ad-hoc styling |
-| Document viewing | PDF.js | Keeps original PDFs accessible during side-by-side review | Large scans can be memory-intensive; page rendering should be incremental |
+| Styling | Scoped plain CSS in the Vite client | Keeps the small review surface dependency-light while providing responsive enterprise states | A larger product may later benefit from a shared design-system package |
+| Document viewing | Authorized browser PDF/image viewer | Keeps the original private document visible without adding a viewer dependency | Advanced page annotations are not part of Part 3 |
 | Authentication | JWT-based authentication with server-side role checks | Matches the proposed stack and works for a single application | Token revocation and refresh policy still need a concrete decision |
 | File storage | Local storage behind a storage abstraction in development; private India-region object storage in deployment | Simple local setup with a replaceable production boundary | Local storage is not an acceptable production confidentiality or availability strategy |
 | AI integration | Vision-AI adapter with provider-specific implementation | Allows provider change and keeps policy checks outside the provider SDK | Provider, model, region, cost, and no-training evidence remain unresolved |
@@ -61,7 +61,7 @@ The main modules are:
 
 ### Proposed additions and omissions
 
-- **Proposed:** React Router is a small, justified addition for the shipment list, upload, review, report, and export views. If the final screen count is small enough, equivalent route handling may be kept simpler, but URLs should remain deep-linkable.
+- **Implemented Part 3:** The small client uses feature-local React state for shipment list, create, detail/review, and manager report views. It deliberately avoids a router and additional state-management dependency until deep-linking is required.
 - **Proposed:** Do not add a state-management framework initially. Use feature-local React state plus a typed API client; add a cache library only if repeated server-state coordination becomes a real implementation problem.
 - **Proposed:** Do not add a message broker, Kubernetes, Redis, microservices, or a mandatory worker. The brief does not require the operational scale or throughput that would justify them.
 - **Unresolved:** Exact package versions, production hosting provider, AI provider/model, and storage provider must be selected only after verifying availability, data-use terms, and India-hosting support.
@@ -188,49 +188,15 @@ backend/
 
 ## 5. React frontend application structure
 
-**Proposed:** Organize by user workflow rather than by generic UI type. Shared components remain small and presentation-focused.
+**Implemented Part 3:** The small client keeps workflow state local and uses a typed API client. Shared presentation is intentionally compact rather than introducing a component library.
 
 ```text
 frontend/
   src/
-    app/
-      router.tsx
-      auth-context.tsx
-      app-shell.tsx
-    features/
-      auth/
-      shipments/
-        ShipmentListPage.tsx
-        shipment-api.ts
-        shipment-types.ts
-      upload/
-        DocumentUploadPage.tsx
-        upload-api.ts
-      extraction/
-      review/
-        ReviewPage.tsx
-        DocumentViewer.tsx          # PDF.js wrapper
-        ExtractedFieldList.tsx
-        ConfidenceBadge.tsx
-        ValidationPanel.tsx
-        CorrectionHistoryPanel.tsx
-      export/
-      reports/
-    components/
-      Button.tsx
-      StatusBadge.tsx
-      ErrorState.tsx
-      LoadingState.tsx
-      EmptyState.tsx
-      Modal.tsx
-    lib/
-      api-client.ts
-      auth.ts
-      errors.ts
-      formatting.ts
-    styles/
-      tokens.css
-      globals.css
+    App.tsx       # dashboard, upload/viewer, review, report, and actions
+    api.ts        # credentialed API client and CSRF header handling
+    api.test.ts
+    styles.css    # responsive white/beige enterprise styling
 ```
 
 The review screen is the priority screen: the original document and extracted fields remain visible side by side; low-confidence fields and validation discrepancies use clear, restrained visual treatment; confirmation, correction, and resolution controls stay close to the affected field. Loading, empty, and error states are explicit components rather than absent content.
@@ -420,7 +386,7 @@ Exact query-driven indexing should be confirmed after the first implementation s
 
 ## 8. REST API endpoint inventory
 
-The following endpoints are **proposed**. All protected endpoints perform backend authentication, object-level authorization, input validation, and consistent error mapping.
+The table mixes implemented backend endpoints and explicitly planned future endpoints. All protected endpoints perform backend authentication, object-level authorization, input validation, and consistent error mapping.
 
 | Method | Endpoint | Responsibility | Access |
 |---|---|---|---|
@@ -432,20 +398,20 @@ The following endpoints are **proposed**. All protected endpoints perform backen
 | GET | `/api/v1/shipments/{shipment_id}` | Return shipment summary and current state | Authorized shipment user |
 | PATCH | `/api/v1/shipments/{shipment_id}` | Update shipment metadata without changing backend-managed status | Documentation Executive, own shipment (implemented) |
 | POST | `/api/v1/shipments/{shipment_id}/documents` | Validate and store an invoice, packing list, or bill of lading | Executive |
-| GET | `/api/v1/shipments/{shipment_id}/documents/{document_id}` | Return authorized document metadata | Authorized shipment user |
-| GET | `/api/v1/documents/{document_id}/content` | Stream or issue a short-lived authorized file response | Authorized shipment user |
-| POST | `/api/v1/shipments/{shipment_id}/process` | Invoke an idempotent extraction run for available documents with a bounded provider timeout | Executive |
-| GET | `/api/v1/shipments/{shipment_id}/extraction` | Return extraction run, field, confidence, and issue state | Authorized shipment user |
+| GET | `/api/v1/shipments/{shipment_id}/documents` | Return authorized document metadata | Authorized shipment user |
+| GET | `/api/v1/shipments/{shipment_id}/documents/{document_id}/download` | Stream an authorized private document | Authorized shipment user |
+| POST | `/api/v1/shipments/{shipment_id}/documents/{document_id}/extract` | Invoke a bounded OCR/structured extraction run for one authorized document | Executive, Manager |
+| GET | `/api/v1/shipments/{shipment_id}/documents/{document_id}/extraction` | Return persisted extraction status, fields, confidence, and source references | Authorized shipment user |
 | GET | `/api/v1/shipments/{shipment_id}/review` | Return side-by-side review payload, source references, fields, and checks | Executive, Manager |
 | POST | `/api/v1/fields/{field_id}/confirm` | Confirm a field after human review | Executive, Manager as policy permits |
+| POST | `/api/v1/fields/{field_id}/reject` | Reject a field after human review | Executive, Manager as policy permits |
 | PATCH | `/api/v1/fields/{field_id}` | Correct or manually enter a field value; creates a revision and invalidates affected checks | Executive |
-| GET | `/api/v1/shipments/{shipment_id}/corrections` | Return correction/edit history | Executive, Manager |
+| GET | `/api/v1/fields/{field_id}/revisions` | Return append-only field revision history | Executive, Manager |
 | POST | `/api/v1/shipments/{shipment_id}/validations/run` | Run deterministic validation against current reviewed revisions | Executive, Manager |
 | GET | `/api/v1/shipments/{shipment_id}/validations` | Return passed, failed, stale, and unresolved checks with evidence | Executive, Manager |
 | POST | `/api/v1/validations/{validation_id}/review` | Record human review/resolution action; does not bypass rules by default | Executive, Manager as policy permits |
 | GET | `/api/v1/shipments/{shipment_id}/export-eligibility` | Compute and explain current export blockers | Executive, Manager |
-| POST | `/api/v1/shipments/{shipment_id}/exports` | Re-check eligibility and create CSV export attempt | Authorized export role |
-| GET | `/api/v1/exports/{export_id}/download` | Download an authorized generated file | Authorized export role |
+| POST | `/api/v1/shipments/{shipment_id}/exports` | Re-check eligibility and return the provisional CSV | Documentation Executive |
 | GET | `/api/v1/reports/accuracy` | Return accuracy/correction reporting by field and supplier | Manager |
 
 **Unresolved:** Exact manager approval endpoints and permissions depend on the client’s unspecified approval rules. A review endpoint must not become a generic “override” endpoint without an explicit policy.
@@ -525,6 +491,26 @@ Authorization checks must cover shipment ownership/scope, document content, fiel
 - **Unresolved:** Exact confidence thresholds, provider/model, bilingual coverage, OCR behavior, and page-to-field mapping.
 
 HSN codes are extracted when present in the documents. There is no HSN classification or tariff lookup module.
+
+## Part 1 implementation note: OCR and extraction boundary
+
+Part 1 implements the previously proposed synchronous extraction boundary in the existing FastAPI modular monolith. `LocalOCRProvider` reads embedded text from every PDF page with `pypdf`; scanned PDF pages and JPG/PNG files use local Tesseract through PyMuPDF and Pillow. The OCR interface is a protocol, so a managed OCR provider can be injected later without changing the document service.
+
+The default extraction provider is `LocalRuleBasedProvider`, a free conservative fallback that only accepts explicitly labelled values. `OpenAICompatibleProvider` is available only when `EXTRACTION_AI_PROVIDER=openai_compatible` plus an endpoint and secret are configured. Provider output is validated with `ExtractionResult` (`extra="forbid"`, bounded confidence, typed values, ordered page records) before it is persisted. Missing values remain null; no provider result can approve or verify data.
+
+Each document has one latest `DocumentExtraction` row in PostgreSQL. It stores `PENDING`, `PROCESSING`, `SUCCEEDED`, `NEEDS_REVIEW`, or `FAILED`, provider names, page count, validated JSONB result, safe error code/message, and timestamps. `NEEDS_REVIEW` is used for unreadable pages or missing required values; processing failures move the shipment to `PROCESSING_FAILED`. The extraction endpoints remain shipment-scoped and use the existing cookie authentication, CSRF, RBAC, and private storage access controls.
+
+Part 1 intentionally did not implement human confirmation/correction actions, cross-document validation, export gating, or approval. Part 2 implements human review and deterministic validation as a separate layer. Part 3/4 implements the frontend and backend export gate; approval and customs filing remain out of scope. These workflows consume the persisted proposal and must not treat confidence as verification.
+
+## Part 2 implementation note: validation and human review
+
+Part 2 materializes each accepted extraction path into `review_fields`, retaining both the immutable provider proposal (`extracted_value`) and the current human-review value (`current_value`). `field_revisions` is append-only and records extraction, correction, confirmation, and rejection actions with actor IDs, timestamps, previous/new values, and optional notes. Corrections are optimistic-lock protected by a field version and are restricted to the Documentation Executive role; authorized executives/managers may confirm or reject.
+
+The validation service runs four deterministic rules: invoice total against the sum of invoice line quantities multiplied by unit prices; package count across available documents; gross weight across available documents; and net weight across available documents. Comparisons with fewer than two available values are `UNRESOLVED`; differences are `FAILED`; equal exact normalized values are `PASSED`. No tolerance is assumed and no document is selected as the winner. Any correction or rejection marks existing shipment validations `STALE`, requiring an explicit rerun.
+
+The review payload exposes missing, unreadable-page, low-confidence, rejected, and needs-confirmation flags. The low-confidence threshold is configurable through `EXTRACTION_LOW_CONFIDENCE_THRESHOLD` and defaults to `0.80` as an explicit implementation assumption because the brief supplies no threshold. Manager-only accuracy reporting groups final field outcomes by field path and shipment supplier; corrected and rejected initial values are not counted as accurate.
+
+Part 3/4 adds the React/Vite review client and provisional backend CSV path. It does not add customs filing integration, an approval override, or unsupported numeric tolerance.
 
 ## 12. Deterministic validation engine for invoice totals, packages and weights
 
@@ -633,7 +619,7 @@ The backend computes eligibility from current database state for every export re
 - the required manager approval is complete if the confirmed approval policy makes it applicable; and
 - the approved CSV mapping/template is available and can be validated.
 
-The export service re-evaluates this predicate inside a database transaction immediately before creating the `ExportAttempt`. Both correction and export transactions must lock the shipment row first in a consistent order (`SELECT ... FOR UPDATE` or the equivalent ORM operation), then read current fields/validations and update export state. This makes a concurrent correction serialize before or after the eligibility decision rather than allowing an export from a stale snapshot. A correction committed after a completed export marks that artifact stale and requires a new eligibility check before a replacement export.
+The implemented export service re-evaluates this predicate inside a database transaction immediately before returning the provisional CSV. It locks the shipment row, then reads current fields/validations and updates shipment state. A concurrent correction therefore serializes before or after a complete eligibility decision; a correction committed after an export marks validations stale and moves the shipment back to action-required. No export artifact table is implemented.
 
 If blocked, the API returns a structured list of blockers. It does not mark the shipment as exportable merely because the frontend requested export.
 
@@ -648,9 +634,8 @@ If blocked, the API returns a structured list of blockers. It does not mark the 
 - Implement an `ExportMapping`/CSV adapter boundary that consumes an approved template definition and current reviewed shipment values.
 - Keep the template definition separate from the validation and review domain so a later template change does not alter extraction or cross-check rules.
 - Validate every output value against the supplied template contract before generating the file.
-- Generate an `ExportAttempt` for both blocked and successful requests, including actor, shipment, eligibility result, current-input fingerprint/revision snapshot, timestamp, and file reference.
-- Store generated output privately and issue it only through an authorized download endpoint.
-- Mark a prior successful export `STALE` when a later correction affects the shipment; reject downloads of stale artifacts unless an explicit audit/download policy later permits them.
+- Future only: persist an `ExportAttempt` and generated output privately once the client supplies an approved template and artifact-retention policy.
+- Current Part 3/4 behavior: return the provisional CSV directly from the authorized export request and rely on current validation/review state for subsequent eligibility.
 - Do not expose invented column names as client requirements.
 - If a demo requires a synthetic layout before the real template is supplied, label it as synthetic and do not claim it is compatible with the filing software.
 - Do not submit the generated file to a customs portal or claim portal acceptance.
@@ -703,9 +688,7 @@ Every failure must leave the shipment in a truthful state. A failed job cannot m
 
 ### Frontend tests
 
-- React Testing Library/Vitest tests for loading, empty, error, low-confidence, manual-entry, correction, and failed-check states.
-- Review-component tests that keep the original document and fields visible together and expose required actions.
-- Playwright (or an equivalent browser test) for sign-in, upload, review/correction, validation mismatch, blocked export, and cleared export using seeded synthetic data.
+- Current Part 3/4 frontend coverage: Vitest API-client tests and a production TypeScript/Vite build. Component-level and browser-level tests for sign-in, upload, review/correction, validation mismatch, blocked export, and cleared export remain future hardening work.
 - A visual/manual review of the desktop-first layout and responsive behavior for the required screens.
 
 Tests should prioritize business rules and end-to-end core paths over exhaustive component snapshots.
@@ -771,7 +754,7 @@ No Kubernetes, Kafka, Redis, worker runtime, or additional service mesh is propo
 
 The client brief gives a six-week implementation timeline and a separate take-home deadline of 9 November 2026, 11:59 PM IST. The following is a proposed priority sequence for the remaining assignment period; it is not an implementation claim.
 
-The FastAPI/PostgreSQL foundation, authentication/RBAC boundary, and the shipment management slice described in this document are implemented. The remaining slices below are planned work and are not implementation claims.
+The FastAPI/PostgreSQL foundation, authentication/RBAC boundary, shipment management, Part 1 extraction backend, Part 2 validation/review backend, and Part 3 frontend/export slice described in this document are implemented. Deployment hardening and the client's final filing template remain unresolved.
 
 ### Slice 1 — Foundation and security boundary
 
@@ -782,35 +765,30 @@ The FastAPI/PostgreSQL foundation, authentication/RBAC boundary, and the shipmen
 ### Slice 2 — Shipment intake and original-document access
 
 - Completed for Milestone 6: the three document types, upload validation, local storage abstraction, private authorized file access, duplicate protection, and document metadata migration.
-- Shipment status/review progress, extraction, and UI states remain future work; document upload does not claim OCR or AI processing.
-- Add loading, empty, and error states.
+- Backend shipment status, extraction, validation, and review state are implemented; the Part 3 side-by-side UI includes loading, empty, and error states.
 - Seed SHP-24811 and SHP-24812 with the brief’s labelled synthetic data.
 
 ### Slice 3 — Extraction contract and processing loop
 
-- Add synchronous extraction with a bounded timeout, explicit retryable failure state, and idempotent extraction-run handling. Do not add a worker unless provider latency makes it necessary.
-- Add Pydantic extraction schemas and provider abstraction.
-- Implement the selected compliant vision-AI adapter only after provider/data-use verification; keep a fake provider for deterministic tests.
-- Persist confidence, source references where available, invalid-result errors, and non-approving review states.
+- Completed: synchronous extraction with bounded provider timeout, safe failure states, strict Pydantic schemas, provider abstractions, confidence, page/source references, and non-approving review states.
+- Completed: free local OCR/labelled-text provider and opt-in OpenAI-compatible adapter; production provider/data-use verification remains deployment work.
 
 ### Slice 4 — Review and correction history
 
-- Build the side-by-side PDF.js review screen.
-- Add low-confidence and human-verification presentation, confirmation, manual entry, correction transactions, append-only history, and role-aware actions.
-- Add stale-validation invalidation hooks before building the export path.
+- Completed: review payload with low-confidence/missing/unreadable flags, manual correction, confirmation, rejection, append-only field history, optimistic version checks, and role-aware actions.
+- Completed in Part 3: side-by-side authorized document viewer, extracted-field review, confidence/source display, correction/confirmation/rejection, and revision history.
 
 ### Slice 5 — Deterministic validation and state model
 
-- Implement the three validation rules with explicit policy/configuration boundaries.
+- Completed: invoice total/line-item, package-count, and gross/net-weight checks with unresolved unavailable comparisons, exact arithmetic only, evidence, stale results after correction, and truthful shipment states.
 - Demonstrate SHP-24811’s 45 kg mismatch without choosing a source of truth.
-- Add validation evidence, stale results after correction, shipment state transitions, and backend eligibility blockers.
+- Completed in Part 3: backend-enforced export eligibility and provisional CSV; the client template remains unresolved.
 
 ### Slice 6 — Export, reporting, and core tests
 
-- Add the CSV adapter boundary without inventing the client template.
-- If the template remains unavailable, test with a clearly synthetic fixture and keep final compatibility explicitly unresolved.
-- Add correction/accuracy reporting by field and supplier at the level supported by available data.
-- Add Pytest unit/integration/security coverage and focused frontend/browser tests for the critical workflow.
+- Completed: CSV adapter boundary without inventing the client template; the provisional column layout is documented and tested with synthetic data.
+- Completed: backend correction/accuracy reporting by field and shipment supplier, with focused unit and opt-in PostgreSQL integration coverage.
+- Completed: frontend API-client tests and production build; browser-level automation remains a future hardening step.
 
 ### Slice 7 — Deployment and review hardening
 

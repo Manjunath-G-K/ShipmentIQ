@@ -2,12 +2,14 @@
 .env
 .env.*
 !.env.example
+!frontend/.env.example
 
 # Dependencies
 node_modules/
 target/
 build/
 dist/
+*.tsbuildinfo
 
 # IDE
 .idea/

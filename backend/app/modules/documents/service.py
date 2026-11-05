@@ -110,6 +110,8 @@ def upload_document(
         size_bytes=stored.size_bytes,
         sha256=stored.sha256,
     )
+    if shipment.status == "DRAFT":
+        shipment.status = "UPLOADED"
     session.add(document)
     try:
         session.flush()

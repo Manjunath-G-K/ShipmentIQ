@@ -3,6 +3,8 @@
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+
 from app.api.routes.auth import router as auth_router
 from app.api.routes.documents import router as documents_router
 from app.api.routes.extraction import router as extraction_router
@@ -23,6 +25,14 @@ def create_app() -> FastAPI:
         version="0.1.0",
         description="ShipmentIQ backend",
     )
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=sorted(settings.allowed_origins()),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_headers=["Content-Type", settings.auth_csrf_header_name, "X-Request-ID"],
+    )
+
     @application.middleware("http")
     async def add_request_id(request: Request, call_next):
         request.state.request_id = request.headers.get("X-Request-ID", str(uuid4()))

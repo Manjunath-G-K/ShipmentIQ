@@ -1,103 +1,249 @@
+**GitHub:** https://github.com/Manjunath-G-K/ShipmentIQ<br>
+**Live application:** https://manjunath-g-k.github.io/ShipmentIQ/<br>
+**Backend health endpoint:** https://shipmentiq.onrender.com/api/v1/health
+
 # ShipmentIQ Technical Design Document
 
-GitHub URL: https://github.com/Manjunath-G-K/ShipmentIQ
+**Document status:** Implementation audit, November 2026<br>
+**Repository:** ShipmentIQ
 
-Live application URL: Not verified; deployment remains a manual release step.
+> Release note: the public Pages site and Render health endpoint are reachable. At audit time the deployed frontend bundle still contained the pre-bootstrap CSRF client and the deployed API returned 404 for /api/v1/auth/csrf. The corrected CSRF implementation is present locally and must be deployed before the live app is described as fixed.
 
-## 1. Purpose and final scope
+## Executive summary
 
-ShipmentIQ is a customs-broker documentation workbench. It stores a shipment and private source documents, extracts proposed structured values, exposes confidence and page/source evidence, compares current values across documents, supports human review and correction history, reports review outcomes, and returns a backend-gated provisional CSV.
+ShipmentIQ is a customs-broker documentation workbench for Documentation Executives and Documentation Managers. It turns private invoice, packing-list, and bill-of-lading uploads into structured, reviewable shipment data. The source document remains visible beside extracted fields, with confidence and page/locator evidence. Reviewers can compare values across documents, record human decisions, and request a backend-gated provisional CSV.
 
-It does not file on a customs portal, classify HSN codes, calculate duty, provide importer tracking, certify regulatory compliance, or decide which document is correct. Extraction is proposed data; confidence is not verification.
+The problem is a manual, error-prone handoff: a broker reads several documents, re-keys shipment values, notices mismatches, resolves uncertain fields, and prepares a filing-software import. ShipmentIQ makes these steps explicit and auditable. It does not file customs entries, classify HSN codes, calculate duty, provide importer tracking, or certify regulatory compliance.
 
-## 2. Architecture and technology choices
+| Verification item | Result |
+|---|---|
+| Public repository | Verified remote points to the GitHub URL above |
+| Frontend host | GitHub Pages returned HTTP 200 |
+| Backend host | Render health returned HTTP 200 and {"status":"ok"} |
+| CORS | Pages origin allowed; unrelated origin rejected |
+| CSRF bootstrap release | Not live; live endpoint returned 404 |
+| Database provider | Neon is documented, but not independently verifiable publicly |
 
-The implementation is a modular monolith:
+## 1. Problem, users, and scope
 
-```text
+### User roles
+
+| Role | Implemented responsibilities |
+|---|---|
+| Documentation Executive | Sign in, create/update own shipments, upload documents, run extraction, correct fields, confirm/reject fields, run validation, and request eligible CSV export |
+| Documentation Manager | View all shipments in scope, review documents and fields, confirm/reject fields, run validation, and view field/supplier Unchanged Extraction Rate |
+
+The server reloads roles from PostgreSQL for every protected request. A hidden frontend button is not authorization.
+
+### Core build
+
+1. Shipment list, creation, and metadata update.
+2. Private upload of one invoice, packing list, and bill of lading per shipment.
+3. Synchronous OCR/text extraction and structured field materialization.
+4. Side-by-side source viewer and extracted-field review.
+5. Confidence, source-page/locator references, missing/unreadable flags, and revision history.
+6. Deterministic invoice-total, package, gross-weight, and net-weight checks.
+7. Human correction, confirmation, rejection, stale-validation handling, and export eligibility.
+8. Provisional CSV export and manager reporting.
+
+## 2. Architecture
+
+### Modular monolith rationale
+
+One FastAPI process owns authentication, authorization, transactions, document handling, extraction orchestration, review, validation, reporting, and export. This fits a small workflow product and a six-to-eight-screen take-home build. It keeps policy close to data and avoids a queue, broker, service discovery, or distributed deployment before measured latency or throughput requires one.
+
+### Technology choices
+
+| Layer | Actual implementation | Boundary or trade-off |
+|---|---|---|
+| Browser | React 18, TypeScript, Vite, plain CSS | Feature-local state; no router/state-management dependency |
+| API | FastAPI, dependency injection, OpenAPI | Synchronous handlers and service transactions |
+| Schemas | Pydantic v2 | Strict provider and request validation |
+| Persistence | SQLAlchemy 2, PostgreSQL, Alembic | Relational constraints and JSONB evidence |
+| Auth | Argon2id; short-lived JWT in HttpOnly cookie | No refresh-token rotation/password recovery |
+| Storage | Private generated-name filesystem adapter | Render filesystem is ephemeral |
+| OCR | Embedded PDF text; PyMuPDF/Pillow/Tesseract fallback | Tesseract executable is external |
+| Extraction | Local labelled-text parser; optional OpenAI-compatible adapter | External provider setting not publicly verifiable |
+
+### Architecture diagram
+
+~~~text
+User
+  |
+  v
 React + TypeScript + Vite
-        │ credentialed REST + CSRF
-FastAPI application
-  auth/RBAC · shipments · documents/storage
-  OCR/extraction · review/validation · exports/reporting
-        │                         │
-PostgreSQL + Alembic       private local storage adapter
-```
+  | HTTPS REST, credentials, Origin, CSRF header
+  v
+FastAPI modular monolith
+  | auth/RBAC/CSRF
+  | shipments
+  | documents/private storage
+  | extraction/provider adapters
+  | review/revisions/validation
+  | export eligibility/CSV
+  + manager reporting
+       |                         |
+       v                         v
+PostgreSQL + Alembic       private filesystem adapter
+       ^                         ^
+       +---- SQLAlchemy ---------+
+~~~
 
-- Backend: FastAPI, SQLAlchemy 2, Pydantic v2, Alembic, PostgreSQL.
-- Frontend: React 18, TypeScript, Vite, plain scoped CSS; no UI framework or state-management dependency.
-- Authentication: short-lived JWT in an HttpOnly cookie, signed double-submit CSRF cookie/header, server-side role reload from PostgreSQL.
-- Storage: private generated-name local storage behind a `DocumentStorage` protocol. Cloud object storage is intentionally not part of the initial deployment.
-- Processing: synchronous extraction to keep status/failure visible without adding Redis, Kafka, a worker, or another service.
-
-Migrations `0001` through `0006` create the foundation, authentication, shipments, documents, extraction persistence, and review/validation/revision tables. Part 3 CSV export is streamed and does not add an export-attempt table.
+All mutations enter through backend routes protected by authentication, role checks, input validation, exact Origin checks, and CSRF checks. The frontend cannot set shipment status or export eligibility.
 
 ## 3. Data model
 
-- `users`, `roles`, `user_roles`: active identities and database-backed roles.
-- `shipments`: unique reference, importer, supplier, origin, description, creator, timestamps, and backend-controlled status.
-- `shipment_documents`: one invoice, packing list, or bill of lading per type, private storage key, checksum, content type, and owner.
-- `document_extractions`: latest provider names, status, page count, JSON result, timestamps, and safe failure code.
-- `review_fields`: flattened field path, original extracted value, current human-reviewed value, value type, confidence, source references, status, and optimistic version.
-- `field_revisions`: append-only actor/timestamp/action/value history.
-- `shipment_validations`: one current result per deterministic rule, evidence JSON, evaluator, timestamp, and `STALE` state.
+The current migrations create nine tables: users, roles, user_roles, shipments, shipment_documents, document_extractions, review_fields, field_revisions, and shipment_validations. There is no separate supplier table; supplier is a string on shipments.
 
-## 4. Main workflows
+| Entity | Implemented facts |
+|---|---|
+| User | UUID, email, Argon2id password hash, active flag, timestamps |
+| Role/user_roles | Two roles and many-to-many association |
+| Shipment | Unique reference, importer, supplier, origin, description, creator, status, timestamps |
+| ShipmentDocument | Shipment/uploader foreign keys, type, filename, opaque key, content type, size, SHA-256 |
+| DocumentExtraction | One latest run, provider names, status, page count, JSON result, safe errors |
+| ReviewField | Path, extracted/current values, value type, confidence, sources, status, version |
+| FieldRevision | Append-only action, actor, old/new values, note, timestamp |
+| ShipmentValidation | One result per shipment/rule, status, evidence, evaluator, timestamps |
 
-### Authentication and authorization
+### ER diagram
 
-Login validates credentials and sets JWT/CSRF cookies. Every protected request reloads the active user and roles from PostgreSQL. Object scope is enforced for shipments, documents, fields, revisions, validations, reports, and exports. State-changing requests require an allowed `Origin` and matching CSRF cookie/header. Executive-only mutation paths and manager-only reports are enforced on the backend.
+~~~text
+USERS 1 ----< USER_ROLES >---- 1 ROLES
+  |
+  + created_by_id / uploaded_by_id / actor ids
+  v
+SHIPMENTS 1 ----< SHIPMENT_DOCUMENTS 1 ---- 0..1 DOCUMENT_EXTRACTIONS
+    |                         |
+    |                         +----< REVIEW_FIELDS 1 ----< FIELD_REVISIONS
+    |
+    +----< SHIPMENT_VALIDATIONS
 
-### Document intake and access
+Unique shipment reference; one document type per shipment;
+one extraction per document; one field per document/path;
+one validation per shipment/rule; constrained status/action values.
+~~~
 
-Uploads require a declared supported type and are validated by extension, content signature, size, and basic structure. Storage uses opaque generated names and private permissions. Downloads re-check shipment scope and document ownership relationship before opening bytes. The browser viewer consumes the authorized download endpoint; it never receives a public storage path.
+## 4. End-to-end workflows
 
-### OCR and extraction
+### Sign-in and shipment creation
 
-`OCRProvider` and `AIExtractionProvider` are replaceable protocols. Local OCR uses embedded PDF text when available and Tesseract/PyMuPDF/Pillow for scanned PDF pages and images. The default AI path is a free labelled-text parser that only accepts explicitly labelled values. An OpenAI-compatible provider is opt-in through environment configuration. Provider results are normalized narrowly and validated by strict Pydantic models; malformed responses become safe persisted failures. Missing or unreadable values remain missing/needs review.
+1. The client submits credentials to POST /api/v1/auth/login with the exact allowed Origin.
+2. The backend authenticates against PostgreSQL and sets a short-lived JWT cookie plus a signed CSRF cookie.
+3. The client calls /auth/me and loads the shipment list.
+4. Before a state-changing request, the corrected client calls authenticated GET /api/v1/auth/csrf, receives the signed value with Cache-Control: no-store, and keeps it in memory only.
+5. POST /api/v1/shipments sends credentials, Origin, and X-CSRF-Token. The backend verifies the header/cookie match and signature binding to the JWT.
+6. The shipment is created in DRAFT status.
 
-### Human review
+### Document intake, extraction, and review
 
-The review screen keeps an authorized original document beside field values. Each field displays current value, extracted value, confidence, flags, and page/locator references. Executives can correct values; executives and managers can confirm or reject according to the current role policy. Corrections require an expected version and create an append-only revision. Rejected values are cleared rather than replaced with a guess.
+1. An executive selects a type and uploads PDF/JPG/PNG content.
+2. The backend validates filename, extension, size, declared type, file signature, and shallow document structure before storing an opaque key.
+3. The client calls extraction synchronously. OCR returns ordered page records with text, readability, and source type.
+4. The provider returns a strict structured shape; populated fields require confidence and page/locator evidence.
+5. Missing or unreadable values remain NEEDS_REVIEW rather than being guessed.
+6. Reviewers correct scalar values with optimistic version checking, confirm, reject, and inspect history.
 
-### Validation and stale state
+### Validation and export
 
-The deterministic rules are invoice total versus line-item total, package count across available documents, gross weight across available documents, and net weight across available documents. Missing comparison evidence is `UNRESOLVED`, never `PASSED`. Numeric comparisons use exact normalized values because no client tolerance was supplied. Any correction or rejection locks and marks existing validation rows `STALE`; validation must be explicitly rerun.
+The reviewer explicitly runs invoice-total, package-count, gross-weight, and net-weight checks. Fewer than two comparison values produce UNRESOLVED; different normalized values produce FAILED; equality produces PASSED. Corrections and rejections make existing validations STALE.
 
-### CSV export
+The export service recomputes eligibility inside a shipment lock. It blocks failed, unresolved, stale, missing, rejected, unconfirmed, failed-extraction, and incomplete-document conditions. A successful export streams provisional CSV and marks the shipment EXPORTED; later corrections return it to action-required state.
 
-The backend recomputes eligibility for every request. It requires a readable completed extraction, required invoice values and line items, no rejected/low-confidence/unconfirmed populated fields, and all validation rules in `PASSED` state. The export service locks the shipment row while evaluating eligibility and taking the CSV snapshot, so concurrent corrections serialize before or after a complete decision. An export response marks the shipment `EXPORTED`; a later correction changes the shipment to action-required and invalidates validation results.
+~~~text
+Sign in -> Shipment list -> Create DRAFT
+                              |
+                              v
+                 Upload invoice / packing list / BOL
+                              |
+                              v
+                 OCR/text -> structured extraction
+                              |
+                              v
+                 Review fields + evidence + flags
+                    |            |            |
+                 confirm      correct       reject
+                    +            |            +
+                     +------- rerun validation
+                              |
+                   eligible and complete?
+                      /                \
+                    yes                 no
+                     |                   |
+              backend CSV export    show blockers/review
+~~~
 
-The layout is explicitly provisional because the client's actual Excel import template was not supplied. Columns are: `shipment_reference`, `importer`, `supplier`, `origin_country`, `invoice_number`, `invoice_date`, `currency`, `incoterm`, `invoice_total`, `item_description`, `quantity`, `unit_price`, `hsn_code`, `packages`, `gross_weight_kg`, `net_weight_kg`, `containers`.
+## 5. OCR and extraction design
 
-## 5. UI and design decisions
+The default configuration is EXTRACTION_AI_PROVIDER=local, selecting LocalRuleBasedProvider. This is deterministic labelled-text parsing, not an LLM. It extracts explicitly labelled values and simple labelled/table forms from OCR text; it does not claim semantic understanding or measured accuracy.
 
-The client includes sign-in, shipment listing, shipment creation, shipment detail/review, document viewer/upload, validation/export controls, revision history, and manager accuracy reporting. It uses white/beige paper surfaces, dark green navigation, restrained rust accents, responsive grid behavior, and explicit loading/empty/error states. Buttons call real APIs; the frontend never decides authorization or export eligibility.
+PDFs first use pypdf embedded text page by page. Pages with no usable text fall back to PyMuPDF rasterization, Pillow image handling, and the pytesseract wrapper. The Tesseract executable is not installed by requirements.txt; absence becomes a safe OCR failure for scanned files.
 
-## 6. Testing strategy
+An OpenAICompatibleProvider adapter exists behind explicit provider, URL, key, model, and timeout settings. It requests JSON-only output with confidence and sources, then validates the response strictly. Public source and live HTTP do not expose Render environment values, so the deployed external-provider setting cannot be verified. No claim is made that an external LLM is configured in production.
 
-- Backend unit tests cover configuration, security, storage validation, extraction schemas/providers, review rules, and export layout/required fields.
-- PostgreSQL integration tests cover migrations, authentication/RBAC, object access, upload races, extraction persistence, review/revisions, stale validations, blocked/cleared export, and concurrent expected-version updates.
-- Frontend tests cover credentialed API parsing and backend error propagation.
-- The Vite production build is run as a TypeScript and bundling check.
-- A browser-level Playwright suite is not included. Desktop/tablet/mobile browser smoke checks and production hosting verification remain manual release steps.
+The extraction schema requires confidence in 0..1 and at least one source reference for every populated field. Unreadable pages, missing values, malformed provider JSON, OCR failures, and provider failures become explicit statuses or safe error codes. The low-confidence threshold defaults to 0.80, an implementation assumption rather than a measured quality threshold. No accuracy percentage is claimed because there is no labelled evaluation dataset.
 
-## 7. Decisions and assumptions
+Deterministic cross-document validation consumes persisted current review values and never asks an AI provider to choose a winning document.
 
-- Assumption: `0.80` is the default low-confidence threshold because the brief supplies no threshold; it is configurable.
-- Assumption: exact numeric equality is used because the brief supplies no rounding/tolerance policy.
-- Assumption: the local labelled-text provider is the no-cost default; paid AI is never required unless explicitly configured.
-- Assumption: the current role policy permits manager confirmation/rejection and validation, while executive-only corrections/uploads/CSV generation remain server-enforced.
-- The demo seeder creates only clearly marked synthetic documents and is disabled in production.
+## 6. UI and UX decisions
 
-## 8. Limitations and security findings
+The frontend implements sign-in, shipment list, shipment creation, shipment detail/review, and manager report views. The detail view is the primary work surface: a private document viewer sits beside structured fields, while upload, rerun, validation, eligibility, and export controls stay near the shipment heading.
 
-- The actual filing template, manager approval policy, retention policy, supplier identity policy, and legal/regulatory acceptance criteria remain unresolved.
-- No accuracy, performance, cost, 95%-field-accuracy, or amended-entry reduction target is claimed; the repository has no labelled 200-shipment evaluation set.
-- Local storage is for development/demo only. Render's filesystem is ephemeral, so uploaded documents can disappear after restart or redeployment in the initial deployment. HTTPS, secret injection, PostgreSQL backups, and an approved provider/data-use policy are still required for a production service.
-- Login rate limiting, refresh-token rotation, password recovery, and full malware scanning are not implemented.
-- The npm audit review found six development-tool vulnerabilities in the Vitest 2 dependency tree after safe same-major updates to Vite `6.4.5` and Vitest `2.1.9`. Eliminating the remaining advisories requires a major Vitest upgrade; that was not forced because it could change the test tool contract. Production dependencies report zero vulnerabilities with `npm audit --omit=dev`.
+Each field exposes current and extracted values, confidence, source page/locator, status, flags, correction note, actions, and history. Low confidence, rejected/missing values, extraction errors, and validation blockers use restrained status colour and readable text. Export is disabled in the client when ineligible, but the backend independently recomputes eligibility.
 
-## 9. Submission readiness
+Loading, empty, and error states are explicit. The CSS uses a sand/off-white surface, deep green navigation, red/amber status accents, responsive grids, and a desktop-first detail layout that collapses at smaller widths.
 
-The local workflow, migrations, synthetic demo data, backend integration suite, frontend tests, production frontend build, deployment runbook, and this TDD are present. Submission remains conditional on a successful Pages/Render/Neon configuration and smoke test, a separately supplied demo credential set, and the client's real CSV template if filing integration is required.
+## 7. Security and reliability
+
+- Passwords use Argon2id.
+- JWT access tokens are short-lived and stored in an HttpOnly cookie.
+- The CSRF cookie is signed with a nonce and the current JWT value.
+- Protected writes require exact Origin allowlist membership and a matching signed cookie/header pair.
+- The corrected client uses authenticated GET /auth/csrf, Cache-Control: no-store, and an in-memory token only. It does not use localStorage or sessionStorage.
+- CORS permits credentials only for configured exact origins and lists the CSRF header explicitly.
+- Input schemas validate login, shipment, review, upload, extraction, and configuration values.
+- Shipment/document/field access is scoped server-side.
+- Private files use opaque names, restrictive modes, content checks, size limits, checksums, and path/symlink validation.
+- Row locks protect validation/export decisions; optimistic versions protect field corrections.
+
+For separate HTTPS Pages and Render sites, production requires AUTH_COOKIE_SECURE=true and AUTH_COOKIE_SAMESITE=none. Browser privacy modes can still block cross-site cookies. The initial deployment uses ephemeral local filesystem storage. Login rate limiting, refresh-token rotation, password recovery, full malware scanning, durable object storage, browser E2E tests, and operational backup/retention are not implemented.
+
+## 8. Testing and verification
+
+| Check | Result | Notes |
+|---|---:|---|
+| Backend pytest -q tests | 39 passed, 26 skipped | PostgreSQL integration tests skipped because RUN_DB_INTEGRATION was not set and no isolated database was provided |
+| Frontend npm run test | 9 passed | Vitest API-client and CSRF bootstrap coverage |
+| Frontend npm run build | Passed | TypeScript compilation and Vite production bundle |
+| git diff --check | Passed | No whitespace errors |
+| Live frontend | HTTP 200 | Pages host reachable; public bundle is pre-fix |
+| Live backend health | HTTP 200 | Render health returned {"status":"ok"} |
+| Live CSRF bootstrap | Not passed | Endpoint returned 404 because the local fix is not deployed |
+
+Integration tests cover PostgreSQL migrations, authentication/RBAC, shipment scoping, upload/extraction flows, review/revisions, validation state, and export eligibility. They must run only against an isolated test database.
+
+## 9. Assumptions, limitations, and prioritized future work
+
+### Explicit assumptions
+
+1. 0.80 is the default low-confidence threshold because the brief supplies no threshold.
+2. Exact normalized numeric equality is used because no rounding/tolerance policy was supplied.
+3. Managers may review, decide, validate, and report; executive-only corrections, uploads, and CSV generation remain server-enforced.
+4. The CSV field order is provisional because the filing template was not supplied.
+5. The documented Neon target is not independently verifiable from public runtime evidence.
+
+### Client targets, not measured results
+
+The client brief gives targets of reducing data entry from 45 minutes to under 15 minutes, achieving 95% field accuracy on 200 historical shipments, and halving amended Bills of Entry within three months. These are client-provided estimates/targets. ShipmentIQ has no evaluation dataset and makes no measured claim about them.
+
+### Out of scope
+
+No customs-portal filing, HSN classification, duty calculation, importer tracking portal, regulatory certification, autonomous approval, or India data-residency guarantee is implemented.
+
+### Prioritized follow-on work
+
+1. Deploy the CSRF bootstrap fix with a coordinated Pages rebuild and authenticated browser smoke test.
+2. Replace ephemeral Render storage with approved private object storage and define retention/backup.
+3. Install and verify Tesseract in the chosen runtime and evaluate OCR on labelled documents.
+4. Obtain and implement the actual filing-software CSV template and field mapping.
+5. Add browser tests, rate limiting, malware scanning, token revocation policy, and monitoring.

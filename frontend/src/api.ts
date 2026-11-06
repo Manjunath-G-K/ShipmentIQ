@@ -1,3 +1,5 @@
+const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1"]);
+
 function defaultApiBase(): string {
   if (typeof window === "undefined") return "http://127.0.0.1:8000/api/v1";
 
@@ -12,9 +14,31 @@ function defaultApiBase(): string {
   return `${window.location.protocol}//${hostname}:8000/api/v1`;
 }
 
-export const API_BASE = (
-  import.meta.env.VITE_API_BASE_URL || defaultApiBase()
-).replace(/\/$/, "");
+export function resolveApiBase(
+  configured = import.meta.env.VITE_API_BASE_URL,
+): string {
+  if (!configured || typeof window === "undefined") {
+    return configured || defaultApiBase();
+  }
+
+  // A local API URL is host-specific because the auth and CSRF cookies are
+  // host-only. Keep a configured loopback URL on the same hostname as the UI.
+  try {
+    const configuredUrl = new URL(configured, window.location.origin);
+    if (
+      LOCAL_HOSTNAMES.has(window.location.hostname) &&
+      LOCAL_HOSTNAMES.has(configuredUrl.hostname)
+    ) {
+      configuredUrl.hostname = window.location.hostname;
+      return configuredUrl.toString();
+    }
+  } catch {
+    // Let fetch surface an invalid non-local configuration as before.
+  }
+  return configured;
+}
+
+export const API_BASE = resolveApiBase().replace(/\/$/, "");
 
 export type ApiError = {
   error?: {
@@ -32,12 +56,33 @@ export type Blocker = {
   document_id?: string;
 };
 
-function csrfToken(): string | undefined {
-  const name = import.meta.env.VITE_CSRF_COOKIE_NAME || "shipmentiq_csrf";
-  const item = document.cookie
-    .split("; ")
-    .find((part) => part.startsWith(`${name}=`));
-  return item ? decodeURIComponent(item.slice(name.length + 1)) : undefined;
+let csrfTokenValue: string | undefined;
+
+export function clearCsrfToken(): void {
+  csrfTokenValue = undefined;
+}
+
+async function csrfToken(): Promise<string> {
+  if (csrfTokenValue) return csrfTokenValue;
+
+  const response = await fetch(`${API_BASE}/auth/csrf`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new Error(`CSRF bootstrap failed (${response.status})`);
+  }
+  const payload: unknown = await response.json();
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    !("csrf_token" in payload) ||
+    typeof payload.csrf_token !== "string" ||
+    payload.csrf_token.length === 0
+  ) {
+    throw new Error("CSRF bootstrap returned an invalid token");
+  }
+  csrfTokenValue = payload.csrf_token;
+  return csrfTokenValue;
 }
 
 export async function apiFetch<T>(
@@ -46,15 +91,14 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const method = (init.method || "GET").toUpperCase();
   const headers = new Headers(init.headers);
+  if (path === "/auth/login") clearCsrfToken();
   if (init.body && !(init.body instanceof FormData))
     headers.set("Content-Type", "application/json");
-  if (method !== "GET" && method !== "HEAD") {
-    const token = csrfToken();
-    if (token)
-      headers.set(
-        import.meta.env.VITE_CSRF_HEADER_NAME || "X-CSRF-Token",
-        token,
-      );
+  if (method !== "GET" && method !== "HEAD" && path !== "/auth/login") {
+    headers.set(
+      import.meta.env.VITE_CSRF_HEADER_NAME || "X-CSRF-Token",
+      await csrfToken(),
+    );
   }
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -72,6 +116,7 @@ export async function apiFetch<T>(
       payload?.error?.message || `Request failed (${response.status})`,
     );
   }
+  if (path === "/auth/logout") clearCsrfToken();
   if (response.status === 204) return undefined as T;
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("text/csv")) return (await response.text()) as T;

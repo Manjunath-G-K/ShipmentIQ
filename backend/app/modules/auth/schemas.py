@@ -28,6 +28,10 @@ class UserResponse(BaseModel):
     roles: list[str]
 
 
+class CsrfTokenResponse(BaseModel):
+    csrf_token: str
+
+
 class LogoutResponse(BaseModel):
     status: str
 

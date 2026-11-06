@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import (
@@ -14,11 +14,12 @@ from app.api.dependencies import (
 )
 from app.core.config import Settings, get_settings
 from app.core.errors import AuthenticationError
-from app.core.security import create_access_token, new_csrf_token
+from app.core.security import csrf_tokens_match, create_access_token, new_csrf_token
 from app.db.models import RoleName
 from app.db.session import get_db
 from app.modules.auth.schemas import (
     AccessResponse,
+    CsrfTokenResponse,
     LoginRequest,
     LogoutResponse,
     UserResponse,
@@ -34,24 +35,25 @@ def _user_response(user) -> UserResponse:
 
 
 def _set_session_cookies(response: Response, token: str, csrf_token: str, settings: Settings) -> None:
+    _set_cookie(response, settings.auth_cookie_name, token, httponly=True, settings=settings)
+    _set_cookie(response, settings.auth_csrf_cookie_name, csrf_token, httponly=False, settings=settings)
+
+
+def _set_cookie(
+    response: Response,
+    name: str,
+    value: str,
+    *,
+    httponly: bool,
+    settings: Settings,
+) -> None:
     cookie_kwargs = {
         "path": "/",
         "secure": settings.auth_cookie_secure,
         "samesite": settings.auth_cookie_samesite,
         "max_age": settings.jwt_expire_minutes * 60,
     }
-    response.set_cookie(
-        settings.auth_cookie_name,
-        token,
-        httponly=True,
-        **cookie_kwargs,
-    )
-    response.set_cookie(
-        settings.auth_csrf_cookie_name,
-        csrf_token,
-        httponly=False,
-        **cookie_kwargs,
-    )
+    response.set_cookie(name, value, httponly=httponly, **cookie_kwargs)
 
 
 def _clear_session_cookies(response: Response, settings: Settings) -> None:
@@ -89,6 +91,38 @@ def login(
     token = create_access_token(user.id, settings)
     _set_session_cookies(response, token, new_csrf_token(token, settings), settings)
     return _user_response(user)
+
+
+@router.get(
+    "/csrf",
+    response_model=CsrfTokenResponse,
+    dependencies=[Depends(require_allowed_origin)],
+)
+def csrf_token(
+    request: Request,
+    response: Response,
+    _user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> CsrfTokenResponse:
+    """Expose the signed CSRF value to a cross-origin frontend without cookie access."""
+
+    session_token = request.cookies.get(settings.auth_cookie_name)
+    cookie_token = request.cookies.get(settings.auth_csrf_cookie_name)
+    if session_token is None:
+        raise AuthenticationError()
+
+    if not csrf_tokens_match(cookie_token, cookie_token, session_token, settings):
+        cookie_token = new_csrf_token(session_token, settings)
+        _set_cookie(
+            response,
+            settings.auth_csrf_cookie_name,
+            cookie_token,
+            httponly=False,
+            settings=settings,
+        )
+
+    response.headers["Cache-Control"] = "no-store"
+    return CsrfTokenResponse(csrf_token=cookie_token)
 
 
 @router.post(

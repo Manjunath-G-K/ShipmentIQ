@@ -103,6 +103,35 @@ def test_login_sets_cookie_session_and_me(auth_users) -> None:
     assert me_response.json() == body
 
 
+def test_csrf_bootstrap_returns_uncached_cookie_value_and_rotates_consistently(auth_users) -> None:
+    client = TestClient(app)
+    assert login(client, auth_users["executive_email"], EXECUTIVE_PASSWORD).status_code == 200
+    settings = get_settings()
+    original_token = client.cookies.get(settings.auth_csrf_cookie_name)
+
+    bootstrapped = client.get("/api/v1/auth/csrf", headers={"Origin": ORIGIN})
+
+    assert bootstrapped.status_code == 200
+    assert bootstrapped.headers["cache-control"] == "no-store"
+    assert bootstrapped.json()["csrf_token"] == original_token
+    assert bootstrapped.json()["csrf_token"] == client.cookies.get(settings.auth_csrf_cookie_name)
+
+    client.cookies.set(settings.auth_csrf_cookie_name, "invalid-token")
+    rotated = client.get("/api/v1/auth/csrf", headers={"Origin": ORIGIN})
+    rotated_token = rotated.json()["csrf_token"]
+
+    assert rotated.status_code == 200
+    assert rotated.headers["cache-control"] == "no-store"
+    assert rotated_token != "invalid-token"
+    assert rotated_token == client.cookies.get(settings.auth_csrf_cookie_name)
+
+    logged_out = client.post(
+        "/api/v1/auth/logout",
+        headers={"Origin": ORIGIN, "X-CSRF-Token": rotated_token},
+    )
+    assert logged_out.status_code == 200
+
+
 def test_invalid_credentials_and_invalid_input_are_rejected(auth_users) -> None:
     client = TestClient(app)
 

@@ -105,6 +105,14 @@ def protected_write_headers(client: TestClient) -> dict[str, str]:
     return {"Origin": ORIGIN, "X-CSRF-Token": csrf_token}
 
 
+def csrf_bootstrap_headers(client: TestClient) -> dict[str, str]:
+    response = client.get("/api/v1/auth/csrf", headers={"Origin": ORIGIN})
+    assert response.status_code == 200
+    token = response.json()["csrf_token"]
+    assert token == client.cookies.get(get_settings().auth_csrf_cookie_name)
+    return {"Origin": ORIGIN, "X-CSRF-Token": token}
+
+
 def payload(reference: str) -> dict[str, str]:
     return {
         "shipment_reference": reference,
@@ -124,7 +132,7 @@ def test_create_get_and_update_shipment(shipment_users) -> None:
     created = client.post(
         "/api/v1/shipments",
         json=payload(f"SHP-{uuid4().hex[:10]}"),
-        headers=protected_write_headers(client),
+        headers=csrf_bootstrap_headers(client),
     )
 
     assert created.status_code == 201

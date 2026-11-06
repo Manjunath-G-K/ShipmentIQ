@@ -1,8 +1,8 @@
 # ShipmentIQ Technical Design Document
 
-GitHub URL: https://github.com/Manjunath-G-K/isocode-engineering-challenge
+GitHub URL: https://github.com/Manjunath-G-K/ShipmentIQ
 
-Live application URL: Not deployed.
+Live application URL: Not verified; deployment remains a manual release step.
 
 ## 1. Purpose and final scope
 
@@ -27,7 +27,7 @@ PostgreSQL + Alembic       private local storage adapter
 - Backend: FastAPI, SQLAlchemy 2, Pydantic v2, Alembic, PostgreSQL.
 - Frontend: React 18, TypeScript, Vite, plain scoped CSS; no UI framework or state-management dependency.
 - Authentication: short-lived JWT in an HttpOnly cookie, signed double-submit CSRF cookie/header, server-side role reload from PostgreSQL.
-- Storage: private generated-name local storage behind a `DocumentStorage` protocol. Production object storage is a deployment decision, not implemented here.
+- Storage: private generated-name local storage behind a `DocumentStorage` protocol. Cloud object storage is intentionally not part of the initial deployment.
 - Processing: synchronous extraction to keep status/failure visible without adding Redis, Kafka, a worker, or another service.
 
 Migrations `0001` through `0006` create the foundation, authentication, shipments, documents, extraction persistence, and review/validation/revision tables. Part 3 CSV export is streamed and does not add an export-attempt table.
@@ -80,7 +80,7 @@ The client includes sign-in, shipment listing, shipment creation, shipment detai
 - PostgreSQL integration tests cover migrations, authentication/RBAC, object access, upload races, extraction persistence, review/revisions, stale validations, blocked/cleared export, and concurrent expected-version updates.
 - Frontend tests cover credentialed API parsing and backend error propagation.
 - The Vite production build is run as a TypeScript and bundling check.
-- A browser-level Playwright suite and production hosting smoke test are not included; these are explicit remaining hardening work.
+- A browser-level Playwright suite is not included. Desktop/tablet/mobile browser smoke checks and production hosting verification remain manual release steps.
 
 ## 7. Decisions and assumptions
 
@@ -94,10 +94,10 @@ The client includes sign-in, shipment listing, shipment creation, shipment detai
 
 - The actual filing template, manager approval policy, retention policy, supplier identity policy, and legal/regulatory acceptance criteria remain unresolved.
 - No accuracy, performance, cost, 95%-field-accuracy, or amended-entry reduction target is claimed; the repository has no labelled 200-shipment evaluation set.
-- Local storage is for development/demo only. Production requires private storage, HTTPS, secret injection, backups, and an approved provider/data-use policy.
+- Local storage is for development/demo only. Render's filesystem is ephemeral, so uploaded documents can disappear after restart or redeployment in the initial deployment. HTTPS, secret injection, PostgreSQL backups, and an approved provider/data-use policy are still required for a production service.
 - Login rate limiting, refresh-token rotation, password recovery, and full malware scanning are not implemented.
 - The npm audit review found six development-tool vulnerabilities in the Vitest 2 dependency tree after safe same-major updates to Vite `6.4.5` and Vitest `2.1.9`. Eliminating the remaining advisories requires a major Vitest upgrade; that was not forced because it could change the test tool contract. Production dependencies report zero vulnerabilities with `npm audit --omit=dev`.
 
 ## 9. Submission readiness
 
-The local end-to-end workflow, migrations, synthetic demo data, backend integration suite, frontend tests, production frontend build, deployment runbook, and this TDD are present. Submission remains conditional on providing the client's real CSV template, a reviewer-supplied demo credential set, and any required production URL/GitHub URL outside this workspace.
+The local workflow, migrations, synthetic demo data, backend integration suite, frontend tests, production frontend build, deployment runbook, and this TDD are present. Submission remains conditional on a successful Pages/Render/Neon configuration and smoke test, a separately supplied demo credential set, and the client's real CSV template if filing integration is required.

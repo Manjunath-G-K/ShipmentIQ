@@ -1,5 +1,19 @@
+function defaultApiBase(): string {
+  if (typeof window === "undefined") return "http://127.0.0.1:8000/api/v1";
+
+  // Keep host-only auth and CSRF cookies readable when the UI is opened on
+  // either supported local hostname. A cookie set by localhost is not
+  // available to a page running on 127.0.0.1, and vice versa.
+  const hostname =
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1"
+      ? window.location.hostname
+      : "127.0.0.1";
+  return `${window.location.protocol}//${hostname}:8000/api/v1`;
+}
+
 export const API_BASE = (
-  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api/v1"
+  import.meta.env.VITE_API_BASE_URL || defaultApiBase()
 ).replace(/\/$/, "");
 
 export type ApiError = {

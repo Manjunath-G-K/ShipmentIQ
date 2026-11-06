@@ -1,6 +1,6 @@
 # ShipmentIQ frontend
 
-This is the finalized Part 3/4 React/TypeScript/Vite client. It uses the backend session cookie and CSRF cookie; there is no mock data or client-only authorization. Set `VITE_API_BASE_URL` when the API is not at `http://127.0.0.1:8000/api/v1`. `VITE_CSRF_COOKIE_NAME` and `VITE_CSRF_HEADER_NAME` are available when the backend uses non-default names.
+This is the finalized Part 3/4 React/TypeScript/Vite client. It uses the backend session cookie and CSRF cookie; there is no mock data or client-only authorization. By default, the API uses port `8000` on the browser's `localhost` or `127.0.0.1` hostname; set `VITE_API_BASE_URL` for a custom API host, port, or deployment. `VITE_BASE_PATH` controls the Vite deployment prefix (the Pages workflow sets `/ShipmentIQ/`). `VITE_CSRF_COOKIE_NAME` and `VITE_CSRF_HEADER_NAME` are available when the backend uses non-default names.
 
 ```powershell
 npm install

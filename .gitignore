@@ -35,5 +35,11 @@ backend/.env
 backend/.env.*
 !backend/.env.example
 
+# Runtime private document storage
+backend/private_storage/
+
+# Launcher runtime markers
+.shipmentiq-runtime/
+
 # Test artifacts
 coverage/

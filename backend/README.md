@@ -48,12 +48,12 @@ Authentication also requires `JWT_SECRET_KEY` to be set to a long, local-only ra
 
 The root `docker-compose.yml` contains only PostgreSQL. It requires the database credentials to be supplied through environment variables and stores data in the named `shipmentiq-postgres-data` volume.
 
-From the repository root, set safe development-only values in the current PowerShell session and start PostgreSQL:
+From the repository root, set local-only values in the current PowerShell session and start PostgreSQL. Never copy those values into Git or public documentation:
 
 ```powershell
 $env:POSTGRES_DB = "shipmentiq"
 $env:POSTGRES_USER = "shipmentiq_dev"
-$env:POSTGRES_PASSWORD = "change-me-locally"
+$env:POSTGRES_PASSWORD = "<local-only-value>"
 # If port 5432 is already in use, set this to an available host port, e.g. 55432.
 # $env:POSTGRES_PORT = "55432"
 docker compose up -d postgres
@@ -67,13 +67,7 @@ Set-Location backend
 Copy-Item .env.example .env
 ```
 
-Then set `DATABASE_URL` in `backend/.env` to:
-
-```text
-postgresql+psycopg://shipmentiq_dev:change-me-locally@localhost:5432/shipmentiq
-```
-
-The password above is only a local placeholder. Replace it with another local-only value if desired; keep it out of Git. If `POSTGRES_PORT` is set, use that host port in `DATABASE_URL` (for example, `55432` in place of `5432`). The database can be stopped while preserving its data with:
+Set the `DATABASE_URL` variable using the local connection details. If `POSTGRES_PORT` is set, use that host port. The database can be stopped while preserving its data with:
 
 ```powershell
 docker compose stop postgres
@@ -97,14 +91,14 @@ There is no public registration endpoint. To seed synthetic development users, s
 
 ```powershell
 $env:SEED_DEMO_USERS = "true"
-$env:DEMO_EXECUTIVE_EMAIL = "executive@example.test"
-$env:DEMO_EXECUTIVE_PASSWORD = "replace-with-a-local-demo-password"
-$env:DEMO_MANAGER_EMAIL = "manager@example.test"
-$env:DEMO_MANAGER_PASSWORD = "replace-with-a-local-demo-password"
+$env:DEMO_EXECUTIVE_EMAIL = "<separately-provided-demo-email>"
+$env:DEMO_EXECUTIVE_PASSWORD = "<separately-provided-demo-password>"
+$env:DEMO_MANAGER_EMAIL = "<separately-provided-demo-email>"
+$env:DEMO_MANAGER_PASSWORD = "<separately-provided-demo-password>"
 python -m app.scripts.seed_demo_users
 ```
 
-The command is explicit and idempotent: it creates or reconciles the two synthetic users and required roles without printing passwords. Replace the example passwords with local-only values of at least eight characters.
+The command is explicit and idempotent: it creates or reconciles the two synthetic users and required roles without printing passwords. Use separately provided synthetic credentials of at least eight characters; keep their values out of Git and public documentation.
 
 To seed the labelled synthetic reviewer workflow after migrations and demo users are ready, run `python -m app.scripts.seed_demo_data`. This creates or verifies `SHP-24811` with the required 45 kg invoice/packing-list discrepancy and `SHP-24812` as an invoice-only sample. It is disabled in production and does not contain real credentials or personal data.
 

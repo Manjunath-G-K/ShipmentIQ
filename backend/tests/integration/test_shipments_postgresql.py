@@ -247,6 +247,11 @@ def test_state_changes_require_csrf_and_origin_and_status_is_immutable(shipment_
     assert login(
         client, shipment_users["executive_email"], EXECUTIVE_PASSWORD
     ).status_code == 200
+    missing_csrf_create = client.post(
+        "/api/v1/shipments",
+        json=payload(f"SHP-{uuid4().hex[:10]}"),
+        headers={"Origin": ORIGIN},
+    )
     created = client.post(
         "/api/v1/shipments",
         json=payload(f"SHP-{uuid4().hex[:10]}"),
@@ -275,7 +280,10 @@ def test_state_changes_require_csrf_and_origin_and_status_is_immutable(shipment_
         headers=protected_write_headers(client),
     )
 
+    assert missing_csrf_create.status_code == 403
+    assert missing_csrf_create.json()["error"]["code"] == "CSRF_FAILED"
     assert missing_csrf.status_code == 403
+    assert missing_csrf.json()["error"]["code"] == "CSRF_FAILED"
     assert invalid_origin.status_code == 403
     assert invalid_origin.json()["error"]["code"] == "ORIGIN_NOT_ALLOWED"
     assert status_write.status_code == 422

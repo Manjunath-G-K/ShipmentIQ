@@ -1,126 +1,82 @@
 # ShipmentIQ deployment and review runbook
 
-GitHub URL: https://github.com/Manjunath-G-K/isocode-engineering-challenge
+Repository: https://github.com/Manjunath-G-K/ShipmentIQ
 
-Live application URL: Not deployed.
+Live application URL: not verified; update this placeholder only after a real GitHub Pages and Render smoke test.
 
-This runbook describes the reproducible local/demo deployment. It does not claim a production deployment, India-region hosting, legal compliance, or compatibility with a filing-software template that was not supplied.
+Demo credentials are provided separately. They are not stored in this repository or this document.
 
-## Prerequisites
+## Local Windows demonstration
 
-- Python 3.12 or newer.
-- Node.js and npm compatible with the frontend toolchain.
-- Docker Desktop with Docker Compose, or an available PostgreSQL 15+ instance.
-- Tesseract installed locally if scanned-image OCR is to be demonstrated. Embedded text PDFs use the bundled `pypdf` path.
+Prerequisites: Python 3.12+, Node.js/npm, Docker Desktop with Compose v2, and the dependencies installed in `backend/.venv` and `frontend/node_modules`.
 
-## Local setup
+1. Copy `backend/.env.example` to the ignored `backend/.env`.
+2. Set local-only values for the variable names in that file, including `DATABASE_URL` and `JWT_SECRET_KEY`. Do not commit `.env`.
+3. Set the Compose variable names `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and optionally `POSTGRES_PORT` in the local environment.
+4. Run `start-shipmentiq.bat` from the repository root. It starts only the PostgreSQL Compose service and opens separate backend/frontend terminals.
+5. Apply migrations from `backend` with `alembic upgrade head`, then check `alembic current`.
+6. Seed the two synthetic demo accounts by setting `SEED_DEMO_USERS`, `DEMO_EXECUTIVE_EMAIL`, `DEMO_EXECUTIVE_PASSWORD`, `DEMO_MANAGER_EMAIL`, and `DEMO_MANAGER_PASSWORD` locally, then run `python -m app.scripts.seed_demo_users`.
+7. Optionally seed the labelled synthetic shipment workflow with `python -m app.scripts.seed_demo_data`.
+8. Use `stop-shipmentiq.bat` to stop only the launcher process trees and the PostgreSQL service. It never removes the named volume.
 
-1. From the repository root, set local-only values for the Compose variable names `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and optionally `POSTGRES_PORT`. The values must not be committed.
+The launcher URLs are:
 
-2. Start PostgreSQL:
+- Frontend: `http://127.0.0.1:5173`
+- Health: `http://127.0.0.1:8000/api/v1/health`
+- Swagger: `http://127.0.0.1:8000/docs`
 
-   ```powershell
-   docker compose up -d postgres
-   docker compose ps
-   ```
+The synthetic review case `SHP-24811` contains invoice gross weight 3,120 kg and packing-list gross weight 3,165 kg. The expected 45 kg discrepancy is surfaced for human review; the system does not choose a correct value.
 
-3. Create the backend environment:
+## Required environment variable names
 
-   ```powershell
-   Set-Location backend
-   py -3.12 -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install -r requirements.txt
-   Copy-Item .env.example .env
-   ```
+Backend settings are defined in `backend/app/core/config.py` and listed in `backend/.env.example`. Configure only through the local environment or the deployment platform:
 
-   Fill the local `.env` values for the variable names documented in `backend/.env.example`. At minimum, configure `DATABASE_URL` and `JWT_SECRET_KEY`. For local browser access, keep `AUTH_ALLOWED_ORIGINS` aligned with the frontend origin.
+`APP_NAME`, `ENVIRONMENT`, `API_V1_PREFIX`, `LOG_LEVEL`, `DATABASE_URL`, `DB_CONNECT_TIMEOUT`, `JWT_SECRET_KEY`, `JWT_ALGORITHM`, `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_EXPIRE_MINUTES`, `AUTH_COOKIE_NAME`, `AUTH_COOKIE_SECURE`, `AUTH_COOKIE_SAMESITE`, `AUTH_CSRF_COOKIE_NAME`, `AUTH_CSRF_HEADER_NAME`, `AUTH_ALLOWED_ORIGINS`, `SEED_DEMO_USERS`, `DEMO_EXECUTIVE_EMAIL`, `DEMO_EXECUTIVE_PASSWORD`, `DEMO_MANAGER_EMAIL`, `DEMO_MANAGER_PASSWORD`, `DOCUMENT_STORAGE_PATH`, `DOCUMENT_MAX_SIZE_BYTES`, `OCR_PROVIDER`, `EXTRACTION_AI_PROVIDER`, `EXTRACTION_AI_API_URL`, `EXTRACTION_AI_API_KEY`, `EXTRACTION_AI_MODEL`, `EXTRACTION_AI_TIMEOUT_SECONDS`, and `EXTRACTION_LOW_CONFIDENCE_THRESHOLD`.
 
-4. Apply all database migrations:
+Frontend build variables are `VITE_API_BASE_URL`, `VITE_BASE_PATH`, `VITE_CSRF_COOKIE_NAME`, and `VITE_CSRF_HEADER_NAME`. The frontend must never receive a secret; `VITE_API_BASE_URL` is only a public backend origin.
 
-   ```powershell
-   alembic upgrade head
-   alembic current
-   ```
+## Neon PostgreSQL
 
-   The expected head is `0006_review_validation`.
+1. Create a Neon PostgreSQL project and database.
+2. Copy the Neon-provided connection string into the deployment platform's `DATABASE_URL` setting only. Require SSL using the connection-string option supplied by Neon; never commit or paste the value into documentation.
+3. Run `alembic upgrade head` from the `backend` directory with the deployment environment loaded, then verify `alembic current` reports `0006_review_validation`.
+4. Provision the two synthetic demo accounts through a controlled, non-public administrative operation using the variable names above. Public registration is not implemented.
 
-5. Seed synthetic reviewer accounts. Set local values for `SEED_DEMO_USERS`, `DEMO_EXECUTIVE_EMAIL`, `DEMO_EXECUTIVE_PASSWORD`, `DEMO_MANAGER_EMAIL`, and `DEMO_MANAGER_PASSWORD`, then run:
+## Render backend
 
-   ```powershell
-   python -m app.scripts.seed_demo_users
-   ```
+Create a Web Service connected to this repository with:
 
-   Password values are intentionally not documented or committed. The reviewer credentials are the values supplied through those environment variables.
+- Root directory: `backend`
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- Health check path: `/api/v1/health`
 
-   Working synthetic demo login details:
+Set the backend environment variable names listed above. For a cross-site GitHub Pages frontend, use `ENVIRONMENT=production`, `AUTH_COOKIE_SECURE=true`, `AUTH_COOKIE_SAMESITE=none`, and set `AUTH_ALLOWED_ORIGINS` to the exact Pages origin without a path. Keep `allow_credentials` enabled; do not weaken CSRF or CORS. Set the frontend's `VITE_API_BASE_URL` to the Render backend URL with `/api/v1` appended; the client appends route paths after that base.
 
-   - Documentation Executive: `executive@example.test`
-   - Documentation Manager: `manager@example.test`
-   - Passwords: choose local values of at least eight characters for `DEMO_EXECUTIVE_PASSWORD` and `DEMO_MANAGER_PASSWORD`; the repository contains no shared or published password.
+Verify browser cookie behavior manually after both hosts are live. Some browsers or privacy modes may block third-party cookies even with correct `Secure`/`SameSite=None` settings; that is a deployment compatibility constraint, not a reason to disable CSRF.
 
-   After seeding, use the executive account for shipment creation, document upload, correction, and provisional CSV export. Use the manager account for cross-document review, validation, revision history, and accuracy reporting. Server-side RBAC remains authoritative.
+Render's free tier may sleep between requests. Its local filesystem is ephemeral, so uploaded documents stored under `DOCUMENT_STORAGE_PATH` can disappear after restart or redeployment. Cloud file storage is intentionally not integrated in this initial deployment; do not claim permanent document retention or production readiness.
 
-6. Seed the labelled synthetic demo shipments and documents:
+## GitHub Pages frontend
 
-   ```powershell
-   python -m app.scripts.seed_demo_data
-   ```
+The workflow `.github/workflows/deploy-pages.yml` builds only `frontend` with Node 20, uses `/ShipmentIQ/` as the Vite base path, uploads `frontend/dist`, and deploys with the official Pages actions. Before running it, create the repository variable `VITE_API_BASE_URL` with the deployed backend origin. No backend files, private storage, `.env` files, or test fixtures are included in the artifact.
 
-   This creates or verifies `SHP-24811` and `SHP-24812` using private local storage and the configured provider adapters. It is disabled in production. The data is synthetic and marked inside the generated documents.
-
-7. Start the API:
-
-   ```powershell
-   uvicorn app.main:app --reload
-   ```
-
-8. In another terminal, start the frontend:
-
-   ```powershell
-   Set-Location frontend
-   npm install
-   npm run dev
-   ```
-
-   Set `VITE_API_BASE_URL`, `VITE_CSRF_COOKIE_NAME`, and `VITE_CSRF_HEADER_NAME` only when the defaults do not match the backend configuration.
-
-## Demo workflow
-
-1. Sign in as the Documentation Executive using the locally configured executive credentials.
-2. Open `SHP-24811`, view the invoice and packing list, and run validation. The synthetic data shows invoice gross weight `3,120 kg` versus packing-list gross weight `3,165 kg`; the system reports a discrepancy and does not choose a correct value.
-3. Confirm or correct fields only after human review. A correction marks existing validation results `STALE`; run validation again before export. A rejected, missing, low-confidence, unresolved, stale, or failed field/check keeps export blocked.
-4. Open `SHP-24812` to see the invoice-only sample. Comparisons without a second document remain unresolved and are not treated as passes.
-5. Sign in as the Documentation Manager to review shipment data, validation evidence, revision history, and the accuracy report. Server-side RBAC remains authoritative even if a frontend control is hidden.
-
-## Production-like deployment guidance
-
-No production deployment is included in this repository. A deployment must provide HTTPS, a secret manager, private document storage, PostgreSQL backups, restricted logs, and a verified AI provider/data-use policy before it is treated as production-ready.
-
-Configure these variable names through the platform secret/environment system:
-
-- Backend: `ENVIRONMENT`, `DATABASE_URL`, `JWT_SECRET_KEY`, `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_EXPIRE_MINUTES`, `AUTH_COOKIE_SECURE`, `AUTH_COOKIE_SAMESITE`, `AUTH_ALLOWED_ORIGINS`, `AUTH_COOKIE_NAME`, `AUTH_CSRF_COOKIE_NAME`, `AUTH_CSRF_HEADER_NAME`.
-- Storage/limits: `DOCUMENT_STORAGE_PATH`, `DOCUMENT_MAX_SIZE_BYTES`.
-- Extraction: `OCR_PROVIDER`, `EXTRACTION_AI_PROVIDER`, `EXTRACTION_AI_API_URL`, `EXTRACTION_AI_API_KEY`, `EXTRACTION_AI_MODEL`, `EXTRACTION_AI_TIMEOUT_SECONDS`, `EXTRACTION_LOW_CONFIDENCE_THRESHOLD`.
-- Frontend build: `VITE_API_BASE_URL`, `VITE_CSRF_COOKIE_NAME`, `VITE_CSRF_HEADER_NAME`.
-
-Keep `SEED_DEMO_USERS` disabled in production. Do not expose the private document directory through a static web server. Build the frontend with `npm run build` and serve `frontend/dist` through the chosen HTTPS frontend/server; run the FastAPI application behind the chosen HTTPS reverse proxy.
+The expected Pages URL is `https://manjunath-g-k.github.io/ShipmentIQ/`, but it remains unverified until a successful GitHub Actions run and browser smoke test.
 
 ## Verification commands
 
 ```powershell
-# Backend unit/default suite
 Set-Location backend
 .\.venv\Scripts\pytest.exe -q
-
-# PostgreSQL integration suite
-$env:RUN_DB_INTEGRATION = "1"
+$env:DATABASE_URL = '<isolated-test-database-url>'
+$env:RUN_DB_INTEGRATION = '1'
 .\.venv\Scripts\pytest.exe -q
+alembic upgrade head
+alembic current
 
-# Frontend
 Set-Location ..\frontend
 npm run test
 npm run build
 ```
 
-The actual filing-software CSV layout remains provisional because the client template was not supplied. ShipmentIQ prepares a documented CSV response; it does not submit to a customs portal or certify legal compliance.
+Never run integration tests against an unknown or production database. The current CSV layout is explicitly provisional because the client's filing-software template was not supplied. ShipmentIQ does not submit customs filings or certify regulatory compliance.

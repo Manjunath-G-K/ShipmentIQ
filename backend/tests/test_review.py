@@ -6,6 +6,7 @@ from app.db.models import DocumentType, ReviewField, ReviewFieldStatus, Shipment
 from app.modules.review.service import (
     _field_flags,
     _invoice_total_validation,
+    _metric,
     _validation_details,
     _validate_value,
 )
@@ -23,6 +24,25 @@ def _field(document_id, path, value, value_type="decimal", status=ReviewFieldSta
         status=status,
         version=1,
     )
+
+
+def test_unchanged_extraction_rate_exposes_review_denominators() -> None:
+    metric = _metric(
+        "invoice.currency",
+        {
+            "confirmed_count": 2,
+            "corrected_count": 1,
+            "rejected_count": 1,
+            "unreviewed_count": 2,
+            "missing_count": 1,
+        },
+    )
+
+    assert metric["total_count"] == 6
+    assert metric["reviewed_count"] == 4
+    assert metric["unreviewed_count"] == 2
+    assert metric["missing_count"] == 1
+    assert metric["unchanged_extraction_rate_percent"] == 50.0
 
 
 def test_invoice_total_validation_is_exact_and_does_not_choose_a_winner() -> None:

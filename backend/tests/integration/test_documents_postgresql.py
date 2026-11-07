@@ -1,8 +1,11 @@
 """Document upload and authorization integration tests against PostgreSQL."""
 
 import os
+import csv
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from io import StringIO
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,11 +14,12 @@ from sqlalchemy import delete, select
 
 from app.core.config import get_settings
 from app.core.security import hash_password
-from app.db.models import DocumentExtraction, Role, RoleName, Shipment, ShipmentDocument, ShipmentValidation, User
+from app.db.models import DocumentExtraction, ReviewField, Role, RoleName, Shipment, ShipmentDocument, ShipmentValidation, User
 from app.db.session import get_session_factory
 from app.main import app
 from app.modules.documents.storage import PrivateFileStorage
 from app.modules.extraction.api import get_ai_provider, get_ocr_provider
+from app.modules.extraction.providers import AIProviderError
 from app.modules.extraction.schemas import (
     ExtractionResult,
     ExtractedDecimal,
@@ -357,6 +361,63 @@ def test_extraction_result_and_status_are_persisted(document_users) -> None:
         app.dependency_overrides.clear()
 
 
+def test_provider_failure_is_persisted_as_failed_not_empty_result(document_users) -> None:
+    class FakeOCR:
+        name = "fake-ocr"
+
+        def extract(self, content: bytes, content_type: str):
+            return [OCRPage(page=1, text="readable synthetic text", readable=True, source="embedded_text")]
+
+    class FailingAI:
+        name = "failing-ai"
+
+        def extract(self, pages, document_type):
+            raise AIProviderError("synthetic provider outage")
+
+    class SuccessfulAI:
+        name = "successful-ai"
+
+        def extract(self, pages, document_type):
+            return ExtractionResult(document_type=document_type, pages=pages)
+
+    app.dependency_overrides[get_ocr_provider] = lambda: FakeOCR()
+    app.dependency_overrides[get_ai_provider] = lambda: SuccessfulAI()
+    try:
+        client = TestClient(app)
+        assert login(client, document_users["executive_email"], EXECUTIVE_PASSWORD).status_code == 200
+        shipment_id = create_shipment(client)
+        upload = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents",
+            data={"document_type": "INVOICE"},
+            files={"file": ("invoice.pdf", PDF, "application/pdf")},
+            headers=protected_write_headers(client),
+        )
+        assert upload.status_code == 201
+        document_id = upload.json()["id"]
+
+        first_attempt = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents/{document_id}/extract",
+            headers=protected_write_headers(client),
+        )
+
+        assert first_attempt.status_code == 200
+        assert first_attempt.json()["result"] is not None
+
+        app.dependency_overrides[get_ai_provider] = lambda: FailingAI()
+        extracted = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents/{document_id}/extract",
+            headers=protected_write_headers(client),
+        )
+
+        assert extracted.status_code == 200
+        assert extracted.json()["status"] == "FAILED"
+        assert extracted.json()["error_code"] == "AI_PROVIDER_FAILED"
+        assert extracted.json()["result"] is None
+        assert extracted.json()["error_message"] == "Configured extraction provider failed"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_review_corrections_revisions_and_validation_staleness(document_users) -> None:
     class FakeOCR:
         name = "fake-ocr"
@@ -376,12 +437,12 @@ def test_review_corrections_revisions_and_validation_staleness(document_users) -
                 pages=pages,
                 parties=PartyFields(
                     importer=ExtractedString(**extracted("Synthetic Importer")),
-                    supplier=ExtractedString(**extracted("Synthetic Supplier")),
+                    supplier=ExtractedString(**extracted("Synthetic Supplier", confidence=0.2)),
                 ),
                 invoice=InvoiceFields(
                     number=ExtractedString(**extracted("INV-EXPORT-1")),
                     date=ExtractedDate(**extracted(date(2026, 11, 5))),
-                    currency=ExtractedString(**extracted("USD")),
+                    currency=ExtractedString(),
                     incoterm=ExtractedString(**extracted("FOB")),
                     total=ExtractedDecimal(**extracted("16.32")),
                 ),
@@ -427,9 +488,62 @@ def test_review_corrections_revisions_and_validation_staleness(document_users) -
         review = client.get(f"/api/v1/shipments/{shipment_id}/review")
         assert review.status_code == 200
         packing = next(item for item in review.json()["documents"] if item["document_type"] == "PACKING_LIST")
+        bill_of_lading = next(item for item in review.json()["documents"] if item["document_type"] == "BILL_OF_LADING")
+        assert not any(field["field_path"].startswith("invoice.") for field in packing["fields"])
+        assert not any(field["field_path"].startswith("invoice.") for field in bill_of_lading["fields"])
         gross_field = next(item for item in packing["fields"] if item["field_path"] == "shipment.gross_weight_kg")
         invoice = next(item for item in review.json()["documents"] if item["document_type"] == "INVOICE")
         invoice_number = next(item for item in invoice["fields"] if item["field_path"] == "invoice.number")
+        invoice_currency = next(item for item in invoice["fields"] if item["field_path"] == "invoice.currency")
+
+        before_review = client.get(f"/api/v1/shipments/{shipment_id}/export-eligibility")
+        assert before_review.status_code == 200
+        assert any(
+            item["code"] == "LOW_CONFIDENCE_FIELD"
+            and item["field_path"] == "parties.supplier"
+            for item in before_review.json()["blockers"]
+        )
+
+        corrected_currency = client.patch(
+            f"/api/v1/fields/{invoice_currency['id']}",
+            json={"value": "USD", "expected_version": invoice_currency["version"]},
+            headers=protected_write_headers(client),
+        )
+        assert corrected_currency.status_code == 200
+        assert corrected_currency.json()["status"] == "CORRECTED"
+        assert corrected_currency.json()["confidence"] is None
+        assert corrected_currency.json()["source_references"] == []
+
+        confirmed_currency = client.post(
+            f"/api/v1/fields/{invoice_currency['id']}/confirm",
+            json={"expected_version": corrected_currency.json()["version"]},
+            headers=protected_write_headers(client),
+        )
+        assert confirmed_currency.status_code == 200
+        assert confirmed_currency.json()["status"] == "CONFIRMED"
+        assert confirmed_currency.json()["confidence"] is None
+        assert confirmed_currency.json()["source_references"] == []
+
+        csrfless_confirm = client.post(
+            f"/api/v1/fields/{gross_field['id']}/confirm",
+            json={"expected_version": gross_field["version"]},
+            headers={"Origin": ORIGIN},
+        )
+        csrfless_correction = client.patch(
+            f"/api/v1/fields/{gross_field['id']}",
+            json={"value": "101", "expected_version": gross_field["version"]},
+            headers={"Origin": ORIGIN},
+        )
+        csrfless_rejection = client.post(
+            f"/api/v1/fields/{invoice_number['id']}/reject",
+            json={"expected_version": invoice_number["version"]},
+            headers={"Origin": ORIGIN},
+        )
+        assert all(
+            response.status_code == 403
+            and response.json()["error"]["code"] == "CSRF_FAILED"
+            for response in (csrfless_confirm, csrfless_correction, csrfless_rejection)
+        )
 
         checks = client.post(
             f"/api/v1/shipments/{shipment_id}/validations/run",
@@ -471,6 +585,11 @@ def test_review_corrections_revisions_and_validation_staleness(document_users) -
         eligible = client.get(f"/api/v1/shipments/{shipment_id}/export-eligibility")
         assert eligible.status_code == 200
         assert eligible.json()["eligible"] is True
+        assert not any(
+            item["code"] == "LOW_CONFIDENCE_FIELD"
+            and item["field_path"] == "invoice.currency"
+            for item in eligible.json()["blockers"]
+        )
         exported = client.post(
             f"/api/v1/shipments/{shipment_id}/exports",
             headers=protected_write_headers(client),
@@ -544,3 +663,292 @@ def test_review_corrections_revisions_and_validation_staleness(document_users) -
         assert supplier["rejected_count"] >= 1
     finally:
         app.dependency_overrides.clear()
+
+
+def test_extraction_rerun_reconciles_removed_line_items_and_containers(document_users) -> None:
+    class FakeOCR:
+        name = "fake-ocr"
+
+        def extract(self, content: bytes, content_type: str):
+            return [OCRPage(page=1, text="synthetic", readable=True, source="embedded_text")]
+
+    def extracted(value):
+        return {"value": value, "confidence": 0.95, "sources": [{"page": 1, "locator": "synthetic"}]}
+
+    class MutableAI:
+        name = "mutable-ai"
+
+        def __init__(self):
+            self.calls = 0
+
+        def extract(self, pages, document_type):
+            item_count = 2 if self.calls == 0 else 1
+            self.calls += 1
+            return ExtractionResult(
+                document_type=document_type,
+                pages=pages,
+                line_items=[
+                    LineItem(
+                        description=ExtractedString(**extracted(f"Synthetic item {index}")),
+                        quantity=ExtractedDecimal(**extracted(str(index))),
+                        unit_price=ExtractedDecimal(**extracted("10.00")),
+                    )
+                    for index in range(1, item_count + 1)
+                ],
+                shipment=ShipmentFields(
+                    containers=[
+                        ExtractedString(**extracted(f"CONT000000{index}"))
+                        for index in range(1, item_count + 1)
+                    ]
+                ),
+            )
+
+    ai = MutableAI()
+    app.dependency_overrides[get_ocr_provider] = lambda: FakeOCR()
+    app.dependency_overrides[get_ai_provider] = lambda: ai
+    try:
+        client = TestClient(app)
+        assert login(client, document_users["executive_email"], EXECUTIVE_PASSWORD).status_code == 200
+        shipment_id = create_shipment(client)
+        uploaded = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents",
+            data={"document_type": "INVOICE"},
+            files={"file": ("invoice.pdf", PDF, "application/pdf")},
+            headers=protected_write_headers(client),
+        )
+        assert uploaded.status_code == 201
+        document_id = uploaded.json()["id"]
+
+        first = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents/{document_id}/extract",
+            headers=protected_write_headers(client),
+        )
+        assert first.status_code == 200
+        second = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents/{document_id}/extract",
+            headers=protected_write_headers(client),
+        )
+        assert second.status_code == 200
+
+        review = client.get(f"/api/v1/shipments/{shipment_id}/review")
+        assert review.status_code == 200
+        fields = {field["field_path"]: field for field in review.json()["documents"][0]["fields"]}
+        assert fields["line_items[0].description"]["value"] == "Synthetic item 1"
+        assert fields["shipment.containers[0]"]["value"] == "CONT0000001"
+        session = get_session_factory()()
+        try:
+            persisted = {
+                field.field_path: field
+                for field in session.scalars(
+                    select(ReviewField).where(ReviewField.document_id == document_id)
+                )
+            }
+            assert persisted["line_items[1].description"].current_value is None
+            assert persisted["line_items[1].description"].status == "NEEDS_REVIEW"
+            assert persisted["shipment.containers[1]"].current_value is None
+            assert persisted["shipment.containers[1]"].status == "NEEDS_REVIEW"
+        finally:
+            session.close()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_real_sample_documents_complete_workflow(document_users) -> None:
+    """Exercise the production local OCR and labelled-text providers end to end."""
+
+    sample_dir = Path(__file__).parents[3] / "output" / "demo-documents"
+    sample_documents = (
+        ("INVOICE", "01_Commercial_Invoice.pdf"),
+        ("PACKING_LIST", "02_Packing_List.pdf"),
+        ("BILL_OF_LADING", "03_Bill_of_Lading.pdf"),
+    )
+    for _document_type, filename in sample_documents:
+        assert (sample_dir / filename).is_file(), f"missing real sample PDF: {filename}"
+
+    expected = {
+        "INVOICE": {
+            "parties": {
+                "importer": "Northstar Automation GmbH",
+                "supplier": "Apex Motion Systems Pvt. Ltd.",
+            },
+            "invoice": {
+                "number": "INV-2026-1105-073",
+                "date": "2026-11-05",
+                "currency": "USD",
+                "incoterm": "FOB",
+                "total": "22000.00",
+            },
+            "line_items": [
+                ("Industrial servo drive controller", "12", "1250.00", "85044090"),
+                ("Motion control gateway", "8", "875.00", "85371099"),
+            ],
+        },
+        "PACKING_LIST": {
+            "parties": {
+                "exporter": "Apex Motion Systems Pvt. Ltd.",
+                "consignee": "Northstar Automation GmbH",
+            },
+            "invoice": {},
+            "line_items": [],
+        },
+        "BILL_OF_LADING": {
+            "parties": {
+                "exporter": "Apex Motion Systems Pvt. Ltd.",
+                "consignee": "Northstar Automation GmbH",
+            },
+            "invoice": {},
+            "line_items": [],
+        },
+    }
+
+    def assert_field_evidence(field: dict) -> None:
+        if field["value"] is None:
+            assert field["confidence"] is None
+            assert field["sources"] == []
+            return
+        assert field["confidence"] is not None
+        assert 0 <= field["confidence"] <= 1
+        assert field["sources"]
+        assert all(source["page"] == 1 and source["locator"] for source in field["sources"])
+
+    client = TestClient(app)
+    assert login(client, document_users["executive_email"], EXECUTIVE_PASSWORD).status_code == 200
+    shipment_id = create_shipment(client)
+    document_ids: dict[str, str] = {}
+
+    for document_type, filename in sample_documents:
+        uploaded = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents",
+            data={"document_type": document_type},
+            files={"file": (filename, (sample_dir / filename).read_bytes(), "application/pdf")},
+            headers=protected_write_headers(client),
+        )
+        assert uploaded.status_code == 201
+        document_id = uploaded.json()["id"]
+        document_ids[document_type] = document_id
+
+        extracted = client.post(
+            f"/api/v1/shipments/{shipment_id}/documents/{document_id}/extract",
+            headers=protected_write_headers(client),
+        )
+        assert extracted.status_code == 200
+        payload = extracted.json()
+        assert payload["status"] == "SUCCEEDED"
+        assert payload["provider_name"] == "local-labelled-text"
+        assert payload["ocr_provider_name"] == "local-pypdf-tesseract"
+        assert payload["page_count"] == 1
+        result = payload["result"]
+        assert result["document_type"] == document_type
+        assert result["pages"] == [
+            {
+                "page": 1,
+                "text": result["pages"][0]["text"],
+                "readable": True,
+                "source": "embedded_text",
+            }
+        ]
+        assert result["pages"][0]["text"]
+        for group in (result["parties"], result["invoice"], result["shipment"]):
+            for field in group.values():
+                if isinstance(field, dict):
+                    assert_field_evidence(field)
+        for item in result["line_items"]:
+            for field in item.values():
+                assert_field_evidence(field)
+        for container in result["shipment"]["containers"]:
+            assert_field_evidence(container)
+
+        for group_name, fields in expected[document_type].items():
+            if group_name == "line_items":
+                assert [
+                    (
+                        item["description"]["value"],
+                        item["quantity"]["value"],
+                        item["unit_price"]["value"],
+                        item["hsn_code"]["value"],
+                    )
+                    for item in result["line_items"]
+                ] == fields
+            else:
+                for field_name, value in fields.items():
+                    assert result[group_name][field_name]["value"] == value
+        assert result["shipment"]["packages"]["value"] == 4
+        assert result["shipment"]["gross_weight_kg"]["value"] == "380"
+        assert result["shipment"]["net_weight_kg"]["value"] == "320"
+        assert [item["value"] for item in result["shipment"]["containers"]] == ["MSCU1234567"]
+
+    review = client.get(f"/api/v1/shipments/{shipment_id}/review")
+    assert review.status_code == 200
+    review_documents = {item["document_type"]: item for item in review.json()["documents"]}
+    assert set(review_documents) == {document_type for document_type, _ in sample_documents}
+    initial_eligibility = client.get(f"/api/v1/shipments/{shipment_id}/export-eligibility")
+    assert initial_eligibility.status_code == 200
+    assert initial_eligibility.json()["eligible"] is False
+
+    invoice_fields = {field["field_path"]: field for field in review_documents["INVOICE"]["fields"]}
+    invoice_number = invoice_fields["invoice.number"]
+    corrected = client.patch(
+        f"/api/v1/fields/{invoice_number['id']}",
+        json={
+            "value": "INV-2026-1105-073-REV1",
+            "note": "Verified against the original sample PDF",
+            "expected_version": invoice_number["version"],
+        },
+        headers=protected_write_headers(client),
+    )
+    assert corrected.status_code == 200
+    assert corrected.json()["status"] == "CORRECTED"
+    confirmed = client.post(
+        f"/api/v1/fields/{invoice_number['id']}/confirm",
+        json={"expected_version": corrected.json()["version"]},
+        headers=protected_write_headers(client),
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["status"] == "CONFIRMED"
+
+    reloaded = client.get(f"/api/v1/shipments/{shipment_id}/review")
+    reloaded_invoice = next(
+        item for item in reloaded.json()["documents"] if item["document_type"] == "INVOICE"
+    )
+    persisted_number = next(
+        field for field in reloaded_invoice["fields"] if field["field_path"] == "invoice.number"
+    )
+    assert persisted_number["value"] == "INV-2026-1105-073-REV1"
+    assert persisted_number["status"] == "CONFIRMED"
+
+    for document in reloaded.json()["documents"]:
+        for field in document["fields"]:
+            if field["value"] is not None and field["status"] != "CONFIRMED":
+                response = client.post(
+                    f"/api/v1/fields/{field['id']}/confirm",
+                    json={"expected_version": field["version"]},
+                    headers=protected_write_headers(client),
+                )
+                assert response.status_code == 200
+                assert response.json()["status"] == "CONFIRMED"
+
+    validations = client.post(
+        f"/api/v1/shipments/{shipment_id}/validations/run",
+        headers=protected_write_headers(client),
+    )
+    assert validations.status_code == 200
+    assert {item["status"] for item in validations.json()["validations"]} == {"PASSED"}
+
+    eligible = client.get(f"/api/v1/shipments/{shipment_id}/export-eligibility")
+    assert eligible.status_code == 200
+    assert eligible.json() == {"eligible": True, "blockers": []}
+    exported = client.post(
+        f"/api/v1/shipments/{shipment_id}/exports",
+        headers=protected_write_headers(client),
+    )
+    assert exported.status_code == 200
+    rows = list(csv.DictReader(StringIO(exported.text)))
+    assert len(rows) == 2
+    assert rows[0]["invoice_number"] == "INV-2026-1105-073-REV1"
+    assert [row["item_description"] for row in rows] == [
+        "Industrial servo drive controller",
+        "Motion control gateway",
+    ]
+    assert all(row["shipment_reference"] == rows[0]["shipment_reference"] for row in rows)
+    assert all(row["packages"] == "4" and row["gross_weight_kg"] == "380" for row in rows)
+    assert all(row["net_weight_kg"] == "320" and row["containers"] == "MSCU1234567" for row in rows)

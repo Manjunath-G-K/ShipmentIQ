@@ -114,18 +114,34 @@ class ExtractionResult(BaseModel):
         return value
 
     def has_missing_values(self) -> bool:
-        fields = [
-            self.parties.importer,
-            self.parties.supplier,
-            self.invoice.number,
-            self.invoice.date,
-            self.invoice.currency,
-            self.invoice.incoterm,
-            self.invoice.total,
-            self.shipment.packages,
-            self.shipment.gross_weight_kg,
-            self.shipment.net_weight_kg,
-        ]
+        if self.document_type == DocumentType.INVOICE:
+            fields = [
+                self.parties.importer,
+                self.parties.supplier,
+                self.invoice.number,
+                self.invoice.date,
+                self.invoice.currency,
+                self.invoice.incoterm,
+                self.invoice.total,
+                self.shipment.packages,
+                self.shipment.gross_weight_kg,
+                self.shipment.net_weight_kg,
+            ]
+        elif self.document_type == DocumentType.PACKING_LIST:
+            fields = [
+                self.parties.exporter,
+                self.parties.consignee,
+                self.shipment.packages,
+                self.shipment.gross_weight_kg,
+                self.shipment.net_weight_kg,
+            ]
+        else:
+            fields = [
+                self.parties.exporter,
+                self.parties.consignee,
+                self.shipment.packages,
+                self.shipment.gross_weight_kg,
+            ]
         return any(field.value is None for field in fields)
 
 

@@ -81,7 +81,7 @@ Start it again with `docker compose start postgres`. To stop and remove the cont
 uvicorn app.main:app --reload
 ```
 
-The interactive OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
+The interactive OpenAPI documentation is available at `http://localhost:8000/docs`.
 
 ## Authentication and demo users
 
@@ -141,21 +141,21 @@ Part 2 provides:
 - `POST /api/v1/shipments/{shipment_id}/validations/run` and `GET /api/v1/shipments/{shipment_id}/validations` for invoice total versus line items, package counts, and gross/net-weight comparisons;
 - `PATCH /api/v1/fields/{field_id}` for executive corrections/manual entry;
 - `POST /api/v1/fields/{field_id}/confirm`, `POST /api/v1/fields/{field_id}/reject`, and `GET /api/v1/fields/{field_id}/revisions` for human decisions and append-only actor/timestamp history; and
-- `GET /api/v1/reports/accuracy` for manager-only field and shipment-supplier metrics.
+- `GET /api/v1/reports/accuracy` for manager-only field and shipment-supplier Unchanged Extraction Rate metrics.
 
-Comparisons with fewer than two available document values remain `UNRESOLVED`. Numeric comparisons use exact normalized values because the brief does not supply tolerances. Any correction or rejection marks prior validation results `STALE`; validation must be explicitly rerun. Accuracy is transparent and conservative: confirmed fields without a correction count as correct, corrected fields count as incorrect initial extraction, and rejected fields count as incorrect; unresolved/unreviewed fields are excluded.
+Comparisons with fewer than two available document values remain `UNRESOLVED`. Numeric comparisons use exact normalized values because the brief does not supply tolerances. Any correction or rejection marks prior validation results `STALE`; validation must be explicitly rerun. The Unchanged Extraction Rate is `confirmed_without_correction / (confirmed_without_correction + corrected + rejected)`. Corrected and rejected fields therefore count as unsuccessful initial extraction. Total, reviewed, unreviewed, and missing counts are exposed separately; unreviewed and missing fields are excluded from the reviewed denominator. The report covers all materialized review fields in shipments visible to the manager; it does not silently filter by shipment status or claim independent AI accuracy.
 
 ## Provisional CSV export
 
-Part 3 exposes `GET /api/v1/shipments/{shipment_id}/export-eligibility` for executive/manager review and `POST /api/v1/shipments/{shipment_id}/exports` for Documentation Executive export. Eligibility is enforced in the backend and requires an invoice, completed/readable extraction, present required fields, no rejected or low-confidence populated fields, human confirmation of populated fields, and every deterministic validation rule in `PASSED` state. Missing, failed, unresolved, stale, rejected, or low-confidence data blocks the export; the frontend cannot bypass this gate.
+Part 3 exposes `GET /api/v1/shipments/{shipment_id}/export-eligibility` for executive/manager review and `POST /api/v1/shipments/{shipment_id}/exports` for Documentation Executive export. Eligibility is enforced in the backend and requires an invoice, completed/readable extraction, present required fields, no rejected or unconfirmed populated fields, human confirmation of populated fields, and every deterministic validation rule in `PASSED` state. Missing, failed, unresolved, stale, rejected, or unreviewed low-confidence data blocks the export; a manually corrected and confirmed field satisfies the review gate without changing its original confidence. The frontend cannot bypass this gate.
 
 The client's actual filing-software template was not supplied, so the current CSV is explicitly provisional. It has one row per invoice line item and these columns: `shipment_reference`, `importer`, `supplier`, `origin_country`, `invoice_number`, `invoice_date`, `currency`, `incoterm`, `invoice_total`, `item_description`, `quantity`, `unit_price`, `hsn_code`, `packages`, `gross_weight_kg`, `net_weight_kg`, and `containers`. No customs filing or automatic approval is performed. The CSV response marks the shipment `EXPORTED`; it does not add a separate export-attempt table or migration.
 
 ## Health checks
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/health
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/health/ready
+Invoke-RestMethod http://localhost:8000/api/v1/health
+Invoke-RestMethod http://localhost:8000/api/v1/health/ready
 ```
 
 The liveness endpoint does not require PostgreSQL. The readiness endpoint executes `SELECT 1` using the configured PostgreSQL engine and returns HTTP 503 with a safe error payload when the database is unavailable.

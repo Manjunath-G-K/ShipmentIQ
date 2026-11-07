@@ -116,7 +116,15 @@ def test_csrf_bootstrap_returns_uncached_cookie_value_and_rotates_consistently(a
     assert bootstrapped.json()["csrf_token"] == original_token
     assert bootstrapped.json()["csrf_token"] == client.cookies.get(settings.auth_csrf_cookie_name)
 
-    client.cookies.set(settings.auth_csrf_cookie_name, "invalid-token")
+    # Match the production cookie scope.  A cookie inserted without a domain
+    # creates a second hostless cookie in httpx rather than replacing the
+    # browser-scoped value, which is not a valid browser-equivalent scenario.
+    client.cookies.set(
+        settings.auth_csrf_cookie_name,
+        "invalid-token",
+        domain="testserver.local",
+        path="/",
+    )
     rotated = client.get("/api/v1/auth/csrf", headers={"Origin": ORIGIN})
     rotated_token = rotated.json()["csrf_token"]
 

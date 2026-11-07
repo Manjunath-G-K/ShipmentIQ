@@ -65,6 +65,11 @@ def process_extraction(
     extraction.status = ExtractionStatus.PROCESSING.value
     extraction.provider_name = ai_provider.name
     extraction.ocr_provider_name = ocr_provider.name
+    # Do not expose a previous successful result while a retry is running or
+    # after the retry fails.  A FAILED/PROCESSING row with stale structured
+    # data would let callers mistake an old result for the current attempt.
+    extraction.result = None
+    extraction.page_count = 0
     extraction.error_code = None
     extraction.error_message = None
     extraction.started_at = datetime.now(timezone.utc)

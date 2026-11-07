@@ -1,4 +1,4 @@
-"""API schemas for human review, validation, and accuracy reporting."""
+"""API schemas for human review, validation, and review-outcome reporting."""
 
 from datetime import datetime
 from typing import Literal
@@ -90,11 +90,14 @@ class ValidationRunResponse(BaseModel):
 
 class AccuracyMetric(BaseModel):
     key: str
+    total_count: int
     reviewed_count: int
+    unreviewed_count: int
+    missing_count: int
     confirmed_count: int
     corrected_count: int
     rejected_count: int
-    accuracy_percent: float | None
+    unchanged_extraction_rate_percent: float | None
 
 
 class AccuracyReportResponse(BaseModel):

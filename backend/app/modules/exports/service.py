@@ -31,6 +31,24 @@ def _blocker(code: str, message: str, **extra: Any) -> dict:
     return {"code": code, "message": message, **extra}
 
 
+def _field_export_blockers(field: ReviewField, low_confidence_threshold: float) -> tuple[str, ...]:
+    """Return blockers while preserving original extraction confidence as audit data.
+
+    A CONFIRMED value has completed human review, so its original confidence is
+    informational rather than an export blocker. Any other populated value must
+    still satisfy both the confidence and confirmation requirements.
+    """
+
+    blockers: list[str] = []
+    if field.status == ReviewFieldStatus.REJECTED.value:
+        blockers.append("REJECTED_FIELD")
+    if field.current_value is not None and field.status != ReviewFieldStatus.CONFIRMED.value:
+        if field.confidence is None or float(field.confidence) < low_confidence_threshold:
+            blockers.append("LOW_CONFIDENCE_FIELD")
+        blockers.append("UNCONFIRMED_FIELD")
+    return tuple(blockers)
+
+
 def _required_paths(document_type: str) -> set[str]:
     if document_type == DocumentType.INVOICE.value:
         return {
@@ -45,12 +63,14 @@ def _required_paths(document_type: str) -> set[str]:
             "shipment.gross_weight_kg",
             "shipment.net_weight_kg",
         }
-    if document_type in {DocumentType.PACKING_LIST.value, DocumentType.BILL_OF_LADING.value}:
+    if document_type == DocumentType.PACKING_LIST.value:
         return {
             "shipment.packages",
             "shipment.gross_weight_kg",
             "shipment.net_weight_kg",
         }
+    if document_type == DocumentType.BILL_OF_LADING.value:
+        return {"shipment.packages", "shipment.gross_weight_kg"}
     return set()
 
 
@@ -115,13 +135,13 @@ def export_eligibility(
             if field is None or field.current_value is None:
                 blockers.append(_blocker("MISSING_REQUIRED_FIELD", "Required field is missing", field_id=field.id if field else None, field_path=path, document_id=document.id))
         for field in field_map.values():
-            if field.status == ReviewFieldStatus.REJECTED.value:
-                blockers.append(_blocker("REJECTED_FIELD", "Rejected fields cannot be exported", field_id=field.id, field_path=field.field_path, document_id=document.id))
-            if field.current_value is not None:
-                if field.confidence is None or float(field.confidence) < low_confidence_threshold:
-                    blockers.append(_blocker("LOW_CONFIDENCE_FIELD", "Low-confidence fields must be reviewed", field_id=field.id, field_path=field.field_path, document_id=document.id))
-                if field.status != ReviewFieldStatus.CONFIRMED.value:
-                    blockers.append(_blocker("UNCONFIRMED_FIELD", "Fields must be human-confirmed before export", field_id=field.id, field_path=field.field_path, document_id=document.id))
+            for blocker_code in _field_export_blockers(field, low_confidence_threshold):
+                message = {
+                    "REJECTED_FIELD": "Rejected fields cannot be exported",
+                    "LOW_CONFIDENCE_FIELD": "Low-confidence fields must be reviewed",
+                    "UNCONFIRMED_FIELD": "Fields must be human-confirmed before export",
+                }[blocker_code]
+                blockers.append(_blocker(blocker_code, message, field_id=field.id, field_path=field.field_path, document_id=document.id))
 
     validation_map = {validation.rule_key: validation for validation in validations}
     for rule_key in VALIDATION_RULES:
@@ -156,7 +176,15 @@ def generate_csv(
     )
     invoice = next(document for document in documents if document.document_type == DocumentType.INVOICE.value)
     invoice_fields = {field.field_path: field for field in fields if field.document_id == invoice.id}
-    line_indexes = sorted({int(path.split("[")[1].split("]")[0]) for path in invoice_fields if path.startswith("line_items[")})
+    line_indexes = sorted(
+        {
+            int(path.split("[")[1].split("]")[0])
+            for path, field in invoice_fields.items()
+            if path.startswith("line_items[")
+            and path.endswith(".quantity")
+            and field.current_value is not None
+        }
+    )
     containers = [field.current_value for field in invoice_fields.values() if field.field_path.startswith("shipment.containers[") and field.current_value is not None]
     output = StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=PROVISIONAL_EXPORT_COLUMNS, lineterminator="\n")

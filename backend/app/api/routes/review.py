@@ -1,14 +1,15 @@
-"""Human review, deterministic validation, and accuracy-report endpoints."""
+"""Human review, deterministic validation, and review-outcome reporting endpoints."""
 
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import require_allowed_origin, require_any_role, require_csrf, require_role
 from app.core.config import Settings, get_settings
-from app.db.models import RoleName, User
+from app.db.models import DocumentExtraction, RoleName, User
 from app.db.session import get_db
 from app.modules.review.schemas import (
     AccuracyReportResponse,
@@ -29,6 +30,7 @@ from app.modules.review.service import (
     reject_field,
     review_snapshot,
     run_validations,
+    _field_flags,
 )
 
 
@@ -43,6 +45,31 @@ ShipmentUser = Annotated[
 ]
 ExecutiveUser = Annotated[User, Depends(require_role(RoleName.DOCUMENTATION_EXECUTIVE))]
 ManagerUser = Annotated[User, Depends(require_role(RoleName.DOCUMENTATION_MANAGER))]
+
+
+def _field_response(
+    session: Session,
+    field,
+    settings: Settings,
+) -> ReviewFieldResponse:
+    extraction = session.scalar(
+        select(DocumentExtraction).where(DocumentExtraction.document_id == field.document_id)
+    )
+    return ReviewFieldResponse(
+        id=field.id,
+        document_id=field.document_id,
+        field_path=field.field_path,
+        value_type=field.value_type,
+        value=field.current_value,
+        extracted_value=field.extracted_value,
+        confidence=float(field.confidence) if field.confidence is not None else None,
+        source_references=field.source_references,
+        status=field.status,
+        version=field.version,
+        flags=_field_flags(field, extraction, settings.extraction_low_confidence_threshold),
+        last_reviewed_by_id=field.last_reviewed_by_id,
+        last_reviewed_at=field.last_reviewed_at,
+    )
 
 
 @router.get("/shipments/{shipment_id}/review", response_model=ReviewResponse)
@@ -92,23 +119,10 @@ def correct(
     payload: FieldCorrectionRequest,
     session: Annotated[Session, Depends(get_db)],
     user: ExecutiveUser,
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ReviewFieldResponse:
     field = correct_field(session, user, field_id, payload.value, payload.note, payload.expected_version)
-    return ReviewFieldResponse(
-        id=field.id,
-        document_id=field.document_id,
-        field_path=field.field_path,
-        value_type=field.value_type,
-        value=field.current_value,
-        extracted_value=field.extracted_value,
-        confidence=float(field.confidence) if field.confidence is not None else None,
-        source_references=field.source_references,
-        status=field.status,
-        version=field.version,
-        flags=["NEEDS_CONFIRMATION"],
-        last_reviewed_by_id=field.last_reviewed_by_id,
-        last_reviewed_at=field.last_reviewed_at,
-    )
+    return _field_response(session, field, settings)
 
 
 @router.post(
@@ -121,23 +135,10 @@ def confirm(
     payload: ReviewDecisionRequest,
     session: Annotated[Session, Depends(get_db)],
     user: ShipmentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ReviewFieldResponse:
     field = confirm_field(session, user, field_id, payload.note, payload.expected_version)
-    return ReviewFieldResponse(
-        id=field.id,
-        document_id=field.document_id,
-        field_path=field.field_path,
-        value_type=field.value_type,
-        value=field.current_value,
-        extracted_value=field.extracted_value,
-        confidence=float(field.confidence) if field.confidence is not None else None,
-        source_references=field.source_references,
-        status=field.status,
-        version=field.version,
-        flags=[],
-        last_reviewed_by_id=field.last_reviewed_by_id,
-        last_reviewed_at=field.last_reviewed_at,
-    )
+    return _field_response(session, field, settings)
 
 
 @router.post(
@@ -150,23 +151,10 @@ def reject(
     payload: ReviewDecisionRequest,
     session: Annotated[Session, Depends(get_db)],
     user: ShipmentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ReviewFieldResponse:
     field = reject_field(session, user, field_id, payload.note, payload.expected_version)
-    return ReviewFieldResponse(
-        id=field.id,
-        document_id=field.document_id,
-        field_path=field.field_path,
-        value_type=field.value_type,
-        value=field.current_value,
-        extracted_value=field.extracted_value,
-        confidence=float(field.confidence) if field.confidence is not None else None,
-        source_references=field.source_references,
-        status=field.status,
-        version=field.version,
-        flags=["REJECTED", "MISSING"],
-        last_reviewed_by_id=field.last_reviewed_by_id,
-        last_reviewed_at=field.last_reviewed_at,
-    )
+    return _field_response(session, field, settings)
 
 
 @router.get("/fields/{field_id}/revisions", response_model=list[RevisionResponse])

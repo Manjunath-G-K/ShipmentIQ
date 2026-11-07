@@ -9,6 +9,7 @@ import re
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -136,7 +137,45 @@ def sync_review_fields(
     """Materialize extraction fields without overwriting human-reviewed values."""
 
     snapshots = flatten_extraction(result)
+    snapshot_paths = {snapshot.path for snapshot in snapshots}
     changed_field_id: UUID | None = None
+
+    # Dynamic collections can shrink on a rerun.  Retaining a previously
+    # extracted line item or container would leave a value that no longer has
+    # evidence in the latest result and could leak into export generation.
+    existing_dynamic_fields = session.scalars(
+        select(ReviewField)
+        .where(ReviewField.document_id == document.id)
+        .where(
+            ReviewField.field_path.like("line_items[%")
+            | ReviewField.field_path.like("shipment.containers[%")
+        )
+        .with_for_update()
+    ).all()
+    for field in existing_dynamic_fields:
+        if field.field_path in snapshot_paths:
+            continue
+        previous = field.current_value
+        if previous is None and field.extracted_value is None:
+            continue
+        field.extracted_value = None
+        field.current_value = None
+        field.confidence = None
+        field.source_references = []
+        field.status = ReviewFieldStatus.NEEDS_REVIEW.value
+        field.version += 1
+        _append_revision(
+            session,
+            field,
+            actor_id,
+            ReviewAction.EXTRACTED,
+            previous,
+            None,
+            "Extraction rerun no longer returned this dynamic field",
+        )
+        if changed_field_id is None:
+            changed_field_id = field.id
+
     for snapshot in snapshots:
         field = session.scalar(
             select(ReviewField)
@@ -481,13 +520,26 @@ def review_snapshot(
     fields = session.scalars(
         select(ReviewField).where(ReviewField.document_id.in_(document_ids))
     ).all() if document_ids else []
-    fields_by_document: dict[UUID, list[ReviewField]] = defaultdict(list)
-    for field in fields:
-        fields_by_document[field.document_id].append(field)
     extractions = session.scalars(
         select(DocumentExtraction).where(DocumentExtraction.document_id.in_(document_ids))
     ).all() if document_ids else []
     extractions_by_document = {extraction.document_id: extraction for extraction in extractions}
+    fields_by_document: dict[UUID, list[ReviewField]] = defaultdict(list)
+    for field in fields:
+        extraction = extractions_by_document.get(field.document_id)
+        if extraction and extraction.result:
+            try:
+                expected_paths = {
+                    snapshot.path
+                    for snapshot in flatten_extraction(
+                        ExtractionResult.model_validate(extraction.result)
+                    )
+                }
+            except ValidationError:
+                expected_paths = None
+            if expected_paths is not None and field.field_path not in expected_paths:
+                continue
+        fields_by_document[field.document_id].append(field)
     document_payloads = []
     for document in documents:
         extraction = extractions_by_document.get(document.id)
@@ -527,11 +579,13 @@ def review_snapshot(
 
 def _metric(key: str, counts: dict[str, int]) -> dict:
     denominator = counts["confirmed_count"] + counts["corrected_count"] + counts["rejected_count"]
+    total_count = denominator + counts["unreviewed_count"]
     return {
         "key": key,
         **counts,
+        "total_count": total_count,
         "reviewed_count": denominator,
-        "accuracy_percent": round(counts["confirmed_count"] * 100 / denominator, 2) if denominator else None,
+        "unchanged_extraction_rate_percent": round(counts["confirmed_count"] * 100 / denominator, 2) if denominator else None,
     }
 
 
@@ -546,8 +600,17 @@ def accuracy_report(session: Session, user: User) -> tuple[list[dict], list[dict
         select(FieldRevision).where(FieldRevision.field_id.in_([field.id for field in fields]))
     ).all() if fields else []
     corrected_field_ids = {revision.field_id for revision in revisions if revision.action == ReviewAction.CORRECTED.value}
-    field_counts: dict[str, dict[str, int]] = defaultdict(lambda: {"confirmed_count": 0, "corrected_count": 0, "rejected_count": 0})
-    supplier_counts: dict[str, dict[str, int]] = defaultdict(lambda: {"confirmed_count": 0, "corrected_count": 0, "rejected_count": 0})
+    def empty_counts() -> dict[str, int]:
+        return {
+            "confirmed_count": 0,
+            "corrected_count": 0,
+            "rejected_count": 0,
+            "unreviewed_count": 0,
+            "missing_count": 0,
+        }
+
+    field_counts: dict[str, dict[str, int]] = defaultdict(empty_counts)
+    supplier_counts: dict[str, dict[str, int]] = defaultdict(empty_counts)
     supplier_by_field = {field.id: supplier for field, supplier in rows}
     for field in fields:
         bucket = field_counts[field.field_path]
@@ -561,6 +624,12 @@ def accuracy_report(session: Session, user: User) -> tuple[list[dict], list[dict
         elif field.status == ReviewFieldStatus.CONFIRMED.value:
             bucket["confirmed_count"] += 1
             supplier_bucket["confirmed_count"] += 1
+        else:
+            bucket["unreviewed_count"] += 1
+            supplier_bucket["unreviewed_count"] += 1
+        if field.current_value is None:
+            bucket["missing_count"] += 1
+            supplier_bucket["missing_count"] += 1
     return (
         [_metric(key, counts) for key, counts in sorted(field_counts.items())],
         [_metric(key, counts) for key, counts in sorted(supplier_counts.items())],

@@ -1,998 +1,174 @@
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, ReactNode, useEffect, useState } from "react";
 import { apiBlob, apiFetch, Blocker } from "./api";
 
 type Role = "DOCUMENTATION_EXECUTIVE" | "DOCUMENTATION_MANAGER";
+type Screen = "tower" | "shipments" | "workspace" | "report";
 type User = { id: string; email: string; roles: Role[] };
-type Shipment = {
-  id: string;
-  shipment_reference: string;
-  importer: string;
-  supplier: string;
-  origin_country: string;
-  description?: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-};
-type Document = {
-  id: string;
-  document_type: "INVOICE" | "PACKING_LIST" | "BILL_OF_LADING" | string;
-  original_filename: string;
-  content_type: string;
-  size_bytes: number;
-  created_at: string;
-};
-type SourceRef = { page_number: number; locator?: string; excerpt?: string };
-type Field = {
-  id: string;
-  document_id: string;
-  field_path: string;
-  value_type: string;
-  value: unknown;
-  extracted_value: unknown;
-  confidence?: number;
-  source_references: SourceRef[];
-  status: string;
-  version: number;
-  flags: string[];
-  last_reviewed_at?: string;
-};
-type ReviewDocument = {
-  id: string;
-  document_type: string;
-  extraction_status?: string;
-  extraction_error_code?: string;
-  page_count: number;
-  fields: Field[];
-};
-type Validation = {
-  id: string;
-  rule_key: string;
-  status: string;
-  details: Record<string, unknown>;
-  evaluated_at: string;
-};
-type Review = {
-  shipment_id: string;
-  documents: ReviewDocument[];
-  validations: Validation[];
-};
+type ShipmentStatus = string;
+type Shipment = { id: string; shipment_reference: string; importer: string; supplier: string; origin_country: string; description?: string; status: ShipmentStatus; created_at: string; updated_at: string };
+type DocumentType = "INVOICE" | "PACKING_LIST" | "BILL_OF_LADING";
+type Document = { id: string; document_type: DocumentType; original_filename: string; content_type: string; size_bytes: number; created_at: string };
+type SourceRef = { page: number; locator?: string };
+type Field = { id: string; document_id: string; field_path: string; value_type: string; value: unknown; extracted_value: unknown; confidence?: number; source_references: SourceRef[]; status: string; version: number; flags: string[]; last_reviewed_at?: string };
+type ReviewDocument = { id: string; document_type: DocumentType; extraction_status?: string; extraction_error_code?: string; page_count: number; fields: Field[] };
+type Validation = { id: string; rule_key: string; status: string; details: Record<string, unknown>; evaluated_at: string };
+type Review = { shipment_id: string; documents: ReviewDocument[]; validations: Validation[] };
 type Eligibility = { eligible: boolean; blockers: Blocker[] };
-type Revision = {
-  id: string;
-  action: string;
-  previous_value: unknown;
-  new_value: unknown;
-  note?: string;
-  actor_id: string;
-  created_at: string;
-};
-type AccuracyMetric = {
-  key: string;
-  reviewed_count: number;
-  confirmed_count: number;
-  corrected_count: number;
-  rejected_count: number;
-  accuracy_percent?: number;
-};
+type Revision = { id: string; action: string; previous_value: unknown; new_value: unknown; note?: string; actor_id: string; created_at: string };
+type AccuracyMetric = { key: string; total_count: number; reviewed_count: number; unreviewed_count: number; missing_count: number; confirmed_count: number; corrected_count: number; rejected_count: number; unchanged_extraction_rate_percent?: number };
 
-const roleLabel = (roles: Role[]) =>
-  roles.includes("DOCUMENTATION_MANAGER")
-    ? "Documentation manager"
-    : "Documentation executive";
-const textValue = (value: unknown) =>
-  value === null || value === undefined
-    ? ""
-    : typeof value === "object"
-      ? JSON.stringify(value)
-      : String(value);
-const prettyPath = (path: string) =>
-  path
-    .replace(/\[(\d+)\]/g, " $1")
-    .replace(/[._]/g, " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-const formatDate = (value?: string) =>
-  value ? new Date(value).toLocaleString() : "—";
+const statuses = ["DRAFT", "UPLOADED", "EXTRACTING", "IN_REVIEW", "ACTION_REQUIRED", "PROCESSING_FAILED", "EXPORTED"];
+const documentLabels: Record<DocumentType, string> = { INVOICE: "Commercial invoice", PACKING_LIST: "Packing list", BILL_OF_LADING: "Bill of lading" };
+const roleLabel = (roles: Role[]) => roles.includes("DOCUMENTATION_MANAGER") ? "Documentation manager" : "Documentation executive";
+const formatDate = (value?: string) => value ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "Not recorded";
+const textValue = (value: unknown) => value === null || value === undefined || value === "" ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+const prettyPath = (path: string) => path.replace(/\[(\d+)\]/g, " $1").replace(/[._]/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+const shortStatus = (status: string) => status.replaceAll("_", " ").toLowerCase().replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
+const isAttentionStatus = (status: string) => ["ACTION_REQUIRED", "PROCESSING_FAILED"].includes(status);
+
+function Icon({ name, size = 18 }: { name: string; size?: number }) {
+  const paths: Record<string, ReactNode> = {
+    grid: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
+    boxes: <><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" /><path d="m4 7.5 8 4.5 8-4.5M12 12v9" /></>,
+    file: <><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v5h5M9 13h6M9 17h6" /></>,
+    check: <><path d="m5 12 4 4L19 6" /></>,
+    download: <><path d="M12 3v12M7 10l5 5 5-5M5 20h14" /></>,
+    plus: <><path d="M12 5v14M5 12h14" /></>,
+    arrow: <><path d="M5 12h14M13 6l6 6-6 6" /></>,
+    back: <><path d="M19 12H5M11 18l-6-6 6-6" /></>,
+    refresh: <><path d="M20 11a8 8 0 0 0-14.7-4L3 10M4 5v5h5M4 13a8 8 0 0 0 14.7 4L21 14m-1 5v-5h-5" /></>,
+    alert: <><path d="M12 4 21 20H3L12 4Z" /><path d="M12 9v5M12 17h.01" /></>,
+    logout: <><path d="M10 5H5v14h5M14 8l4 4-4 4M9 12h9" /></>,
+    menu: <><path d="M4 7h16M4 12h16M4 17h16" /></>,
+    close: <><path d="m6 6 12 12M18 6 6 18" /></>,
+    history: <><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v6h6M12 7v5l3 2" /></>,
+    eye: <><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.5" /></>,
+  };
+  return <svg aria-hidden="true" className="icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name] || paths.file}</svg>;
+}
+
+function Button({ children, variant = "secondary", icon, className = "", ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "quiet" | "danger"; icon?: string }) {
+  return <button className={`button button-${variant} ${className}`} {...props}>{icon && <Icon name={icon} size={16} />}{children}</button>;
+}
+
+function StatusBadge({ status, compact = false }: { status: string; compact?: boolean }) {
+  const tone = isAttentionStatus(status) ? "attention" : status === "EXPORTED" || status === "CONFIRMED" || status === "PASSED" ? "success" : status === "PROCESSING_FAILED" || status === "FAILED" || status === "REJECTED" ? "danger" : "neutral";
+  return <span className={`status-badge status-${tone} ${compact ? "status-compact" : ""}`}><span className="status-dot" />{shortStatus(status)}</span>;
+}
+
+function EmptyState({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) {
+  return <div className="empty-state"><div className="empty-icon"><Icon name="file" size={21} /></div><h3>{title}</h3><p>{detail}</p>{action}</div>;
+}
+
+function LoadingState({ label = "Loading workspace" }: { label?: string }) {
+  return <div className="loading-state"><span className="spinner" />{label}</div>;
+}
+
+function Toast({ toast, onClose }: { toast: { message: string; tone: "success" | "error" } | null; onClose: () => void }) {
+  if (!toast) return null;
+  return <div className={`toast toast-${toast.tone}`} role="status"><span>{toast.tone === "success" ? <Icon name="check" size={16} /> : <Icon name="alert" size={16} />}</span>{toast.message}<button aria-label="Dismiss notification" onClick={onClose}><Icon name="close" size={15} /></button></div>;
+}
 
 function Login({ onLogin }: { onLogin: (user: User) => void }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      onLogin(
-        await apiFetch<User>("/auth/login", {
-          method: "POST",
-          body: JSON.stringify({ email, password }),
-        }),
-      );
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to sign in");
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <main className="login-shell">
-      <section className="login-card">
-        <div className="brand-mark">SI</div>
-        <p className="eyebrow">Trade documentation control</p>
-        <h1>ShipmentIQ</h1>
-        <p className="muted">
-          Review the source, understand the confidence, and release only
-          verified shipment data.
-        </p>
-        <form onSubmit={submit} className="stack">
-          <label>
-            Email
-            <input
-              required
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </label>
-          <label>
-            Password
-            <input
-              required
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </label>
-          {error && <div className="error-banner">{error}</div>}
-          <button className="primary" disabled={busy}>
-            {busy ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
-      </section>
-    </main>
-  );
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent) { event.preventDefault(); setError(""); setBusy(true); try { onLogin(await apiFetch<User>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) })); } catch (caught) { setError(caught instanceof Error ? caught.message : "Unable to sign in"); } finally { setBusy(false); } }
+  return <main className="login-page"><div className="login-rail"><div className="brand-lockup"><span className="brand-symbol">SI</span><span>ShipmentIQ</span></div><div className="login-rail-copy"><span className="kicker">Trade documentation control</span><h1>Move every shipment forward with certainty.</h1><p>A focused workspace for customs documentation, evidence-backed extraction and controlled release.</p></div><div className="login-rail-footer"><span className="live-indicator" /> Secure operations environment</div></div><section className="login-form-wrap"><form className="login-form" onSubmit={submit}><div className="mobile-brand"><span className="brand-symbol">SI</span><span>ShipmentIQ</span></div><span className="kicker">Welcome back</span><h2>Sign in to your workspace</h2><p className="muted">Use your ShipmentIQ account to continue reviewing documentation.</p><label>Email address<input required type="email" autoComplete="email" placeholder="you@company.com" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input required type="password" autoComplete="current-password" placeholder="Enter your password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<Button variant="primary" className="button-wide" disabled={busy}>{busy ? <><span className="spinner spinner-light" />Signing in</> : <>Sign in <Icon name="arrow" size={16} /></>}</Button><p className="form-footnote">Your session is protected by HttpOnly cookies and CSRF controls.</p></form></section></main>;
 }
 
-function ShipmentList({
-  user,
-  onOpen,
-  onCreate,
-  onAccuracy,
-}: {
-  user: User;
-  onOpen: (id: string) => void;
-  onCreate: () => void;
-  onAccuracy: () => void;
-}) {
-  const [shipments, setShipments] = useState<Shipment[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    apiFetch<{ items: Shipment[] }>("/shipments?limit=50")
-      .then((data) => setShipments(data.items))
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, []);
-  return (
-    <>
-      <div className="page-heading">
-        <div>
-          <p className="eyebrow">Operations overview</p>
-          <h1>Shipments</h1>
-          <p className="muted">
-            Document intake, structured extraction and controlled review.
-          </p>
-        </div>
-        <div className="actions">
-          {user.roles.includes("DOCUMENTATION_MANAGER") && (
-            <button className="secondary" onClick={onAccuracy}>
-              Accuracy report
-            </button>
-          )}
-          {user.roles.includes("DOCUMENTATION_EXECUTIVE") && (
-            <button className="primary" onClick={onCreate}>
-              New shipment
-            </button>
-          )}
-        </div>
-      </div>
-      {error && <div className="error-banner">{error}</div>}
-      {loading ? (
-        <div className="state-card">Loading shipments…</div>
-      ) : shipments.length === 0 ? (
-        <div className="state-card">
-          <h3>No shipments yet</h3>
-          <p className="muted">Create a shipment to begin document review.</p>
-        </div>
-      ) : (
-        <div className="shipment-grid">
-          {shipments.map((shipment) => (
-            <button
-              className="shipment-card"
-              key={shipment.id}
-              onClick={() => onOpen(shipment.id)}
-            >
-              <div className="card-top">
-                <span className="status-pill">{shipment.status}</span>
-                <span className="mono">{shipment.shipment_reference}</span>
-              </div>
-              <h3>{shipment.importer}</h3>
-              <p>
-                {shipment.supplier} · {shipment.origin_country}
-              </p>
-              <small>Updated {formatDate(shipment.updated_at)}</small>
-            </button>
-          ))}
-        </div>
-      )}
-    </>
-  );
+function Shell({ user, screen, setScreen, onLogout, children }: { user: User; screen: Screen; setScreen: (screen: Screen) => void; onLogout: () => void; children: ReactNode }) {
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const navigation: { id: Screen; label: string; icon: string }[] = [{ id: "tower", label: "Control tower", icon: "grid" }, { id: "shipments", label: "Shipments", icon: "boxes" }];
+  if (user.roles.includes("DOCUMENTATION_MANAGER")) navigation.push({ id: "report", label: "Accuracy report", icon: "check" });
+  return <div className="shell"><aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}><div className="sidebar-top"><div className="brand-lockup"><span className="brand-symbol">SI</span><span>ShipmentIQ</span></div><button className="mobile-close" aria-label="Close navigation" onClick={() => setMobileOpen(false)}><Icon name="close" /></button></div><div className="workspace-label">Operations workspace</div><nav>{navigation.map((item) => <button key={item.id} className={screen === item.id ? "nav-item nav-active" : "nav-item"} onClick={() => { setScreen(item.id); setMobileOpen(false); }}><Icon name={item.icon} size={18} /><span>{item.label}</span>{item.id === "shipments" && <span className="nav-arrow"><Icon name="arrow" size={14} /></span>}</button>)}</nav><div className="sidebar-bottom"><div className="secure-line"><span className="live-indicator" /> Session secured</div><div className="account"><div className="avatar">{user.email.slice(0, 1).toUpperCase()}</div><div><strong>{user.email}</strong><span>{roleLabel(user.roles)}</span></div><button aria-label="Sign out" onClick={onLogout}><Icon name="logout" size={16} /></button></div></div></aside><div className="main-shell"><header className="mobile-header"><button aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><div className="brand-lockup"><span className="brand-symbol">SI</span><span>ShipmentIQ</span></div><span className="avatar avatar-small">{user.email.slice(0, 1).toUpperCase()}</span></header>{mobileOpen && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setMobileOpen(false)} /> }<main className="main-content"><div className="top-context"><div><span className="context-title">Documentation operations</span><span className="context-separator">/</span><span className="context-current">{screen === "tower" ? "Control tower" : screen === "shipments" ? "Shipments" : screen === "report" ? "Accuracy report" : "Shipment workspace"}</span></div><span className="today">{new Intl.DateTimeFormat(undefined, { dateStyle: "long" }).format(new Date())}</span></div>{children}</main></div></div>;
 }
 
-function CreateShipment({
-  onCreated,
-  onCancel,
-}: {
-  onCreated: (shipment: Shipment) => void;
-  onCancel: () => void;
-}) {
-  const [form, setForm] = useState({
-    shipment_reference: "",
-    importer: "",
-    supplier: "",
-    origin_country: "",
-    description: "",
-  });
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const update =
-    (key: keyof typeof form) =>
-    (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-      setForm({ ...form, [key]: event.target.value });
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      onCreated(
-        await apiFetch<Shipment>("/shipments", {
-          method: "POST",
-          body: JSON.stringify(form),
-        }),
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to create shipment");
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <section className="panel narrow">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">Intake</p>
-          <h2>Create shipment</h2>
-        </div>
-        <button className="text-button" onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-      <form className="form-grid" onSubmit={submit}>
-        <label>
-          Shipment reference
-          <input
-            required
-            value={form.shipment_reference}
-            onChange={update("shipment_reference")}
-          />
-        </label>
-        <label>
-          Origin country
-          <input
-            required
-            value={form.origin_country}
-            onChange={update("origin_country")}
-          />
-        </label>
-        <label>
-          Importer
-          <input required value={form.importer} onChange={update("importer")} />
-        </label>
-        <label>
-          Supplier
-          <input required value={form.supplier} onChange={update("supplier")} />
-        </label>
-        <label className="full">
-          Description
-          <textarea
-            value={form.description}
-            onChange={update("description")}
-            rows={3}
-          />
-        </label>
-        {error && <div className="error-banner full">{error}</div>}
-        <div className="actions full">
-          <button type="button" className="secondary" onClick={onCancel}>
-            Cancel
-          </button>
-          <button className="primary" disabled={busy}>
-            {busy ? "Creating…" : "Create shipment"}
-          </button>
-        </div>
-      </form>
-    </section>
-  );
+function MetricCard({ label, value, detail, tone = "green", icon }: { label: string; value: string | number; detail: string; tone?: string; icon: string }) {
+  return <div className="metric-card"><div className={`metric-icon metric-${tone}`}><Icon name={icon} size={18} /></div><div className="metric-copy"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>;
 }
 
-function DocumentViewer({
-  shipmentId,
-  document,
-}: {
-  shipmentId: string;
-  document?: Document;
-}) {
-  const [url, setUrl] = useState("");
-  const [error, setError] = useState("");
-  useEffect(() => {
-    let active = true;
-    let objectUrl = "";
-    setUrl("");
-    setError("");
-    if (!document)
-      return () => {
-        active = false;
-      };
-    apiBlob(`/shipments/${shipmentId}/documents/${document.id}/download`)
-      .then((blob) => {
-        if (active) {
-          objectUrl = URL.createObjectURL(blob);
-          setUrl(objectUrl);
-        }
-      })
-      .catch((e) => active && setError(e.message));
-    return () => {
-      active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [shipmentId, document?.id]);
-  if (!document)
-    return (
-      <div className="viewer empty">Select a document to view the source.</div>
-    );
-  return (
-    <div className="viewer">
-      {error ? (
-        <div className="error-banner">{error}</div>
-      ) : !url ? (
-        <div className="muted">Loading source document…</div>
-      ) : document.content_type === "application/pdf" ? (
-        <iframe title={document.original_filename} src={url} />
-      ) : (
-        <img alt={document.original_filename} src={url} />
-      )}
-    </div>
-  );
+function useShipments(refreshKey: number, status?: string) {
+  const [data, setData] = useState<{ items: Shipment[]; total: number } | null>(null); const [error, setError] = useState(""); const [loading, setLoading] = useState(true);
+  useEffect(() => { let active = true; setLoading(true); setError(""); const query = new URLSearchParams({ limit: "100", offset: "0" }); if (status) query.set("status", status); apiFetch<{ items: Shipment[]; total: number }>(`/shipments?${query.toString()}`).then((response) => { if (active) setData(response); }).catch((caught) => active && setError(caught instanceof Error ? caught.message : "Unable to load shipments")).finally(() => active && setLoading(false)); return () => { active = false; }; }, [refreshKey, status]);
+  return { data, error, loading };
 }
 
-function FieldRow({
-  field,
-  canEdit,
-  onChanged,
-}: {
-  field: Field;
-  canEdit: boolean;
-  onChanged: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(textValue(field.value));
-  const [note, setNote] = useState("");
-  const [revisions, setRevisions] = useState<Revision[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+function ControlTower({ user, onOpenShipment, onCreate, onRetry }: { user: User; onOpenShipment: (id: string) => void; onCreate: () => void; onRetry: () => void }) {
+  const { data, error, loading } = useShipments(0); const [eligibilities, setEligibilities] = useState<Record<string, Eligibility | null>>({});
+  useEffect(() => { if (!data?.items.length) { setEligibilities({}); return; } let active = true; Promise.all(data.items.map(async (shipment) => { try { return [shipment.id, await apiFetch<Eligibility>(`/shipments/${shipment.id}/export-eligibility`)] as const; } catch { return [shipment.id, null] as const; } })).then((entries) => active && setEligibilities(Object.fromEntries(entries))); return () => { active = false; }; }, [data]);
+  const items = data?.items || []; const resolved = items.length === 0 || items.every((item) => item.id in eligibilities); const reviewCount = items.filter((item) => ["IN_REVIEW", "ACTION_REQUIRED"].includes(item.status)).length; const processingCount = items.filter((item) => ["EXTRACTING", "PROCESSING_FAILED"].includes(item.status)).length; const attentionCount = items.filter((item) => isAttentionStatus(item.status)).length; const readyCount = items.filter((item) => eligibilities[item.id]?.eligible).length;
+  return <div className="page"><div className="hero-row"><div><span className="kicker">Operations overview</span><h1>Good morning, {user.email.split("@")[0]}</h1><p className="page-intro">A live view of document intake, review queues and export readiness.</p></div>{user.roles.includes("DOCUMENTATION_EXECUTIVE") && <Button variant="primary" icon="plus" onClick={onCreate}>New shipment</Button>}</div>{error && <div className="notice notice-error"><Icon name="alert" size={17} /><div><strong>Workspace data unavailable</strong><span>{error}</span></div><Button variant="quiet" onClick={onRetry}>Try again</Button></div>}<div className="metric-grid"><MetricCard label="Total shipments" value={loading ? "—" : data?.total || 0} detail="In your operational scope" icon="boxes" /><MetricCard label="Needs review" value={loading ? "—" : reviewCount} detail="Review or confirmation needed" tone="amber" icon="eye" /><MetricCard label="Processing" value={loading ? "—" : processingCount} detail="Extraction activity" tone="blue" icon="refresh" /><MetricCard label="Export ready" value={loading || !resolved ? "—" : readyCount} detail="Server-verified eligibility" tone="green" icon="check" /></div><div className="tower-grid"><section className="panel panel-table"><div className="section-heading"><div><span className="kicker">Live queue</span><h2>Recent shipments</h2></div><Button variant="quiet" icon="arrow" disabled={!items[0]} onClick={() => onOpenShipment(items[0]?.id || "")}>Open workspace</Button></div>{loading ? <LoadingState label="Loading live queue" /> : items.length === 0 ? <EmptyState title="No shipments in scope" detail="Create a shipment to start your document workflow." action={user.roles.includes("DOCUMENTATION_EXECUTIVE") ? <Button variant="secondary" icon="plus" onClick={onCreate}>Create shipment</Button> : undefined} /> : <ShipmentTable shipments={items.slice(0, 6)} onOpen={onOpenShipment} />}</section><section className="panel alert-panel"><div className="section-heading"><div><span className="kicker">Attention</span><h2>Operational alerts</h2></div><span className="alert-count">{attentionCount}</span></div>{attentionCount === 0 ? <div className="quiet-alert"><span className="quiet-check"><Icon name="check" size={16} /></span><div><strong>No active blockers</strong><span>Every visible shipment is moving through the workflow.</span></div></div> : <div className="alert-list">{items.filter((item) => isAttentionStatus(item.status)).slice(0, 5).map((item) => <button className="alert-item" key={item.id} onClick={() => onOpenShipment(item.id)}><span className="alert-symbol"><Icon name="alert" size={15} /></span><span><strong>{item.shipment_reference}</strong><small>{item.status === "PROCESSING_FAILED" ? "Processing failed" : "Review action required"}</small></span><Icon name="arrow" size={15} /></button>)}</div>}<div className="alert-footnote"><span className="live-indicator" />Status derived from persisted backend records</div></section></div></div>;
+}
+
+function ShipmentTable({ shipments, onOpen }: { shipments: Shipment[]; onOpen: (id: string) => void }) {
+  return <div className="data-table-wrap"><table className="data-table"><thead><tr><th>Shipment</th><th>Parties</th><th>Origin</th><th>Status</th><th>Updated</th><th /></tr></thead><tbody>{shipments.map((shipment) => <tr key={shipment.id} onClick={() => onOpen(shipment.id)}><td><strong className="mono-value">{shipment.shipment_reference}</strong><span className="table-sub">{shipment.description || "Documentation workflow"}</span></td><td><strong>{shipment.importer}</strong><span className="table-sub">Supplier: {shipment.supplier}</span></td><td>{shipment.origin_country}</td><td><StatusBadge status={shipment.status} /></td><td className="muted-cell">{formatDate(shipment.updated_at)}</td><td><button className="row-arrow" aria-label={`Open ${shipment.shipment_reference}`}><Icon name="arrow" size={16} /></button></td></tr>)}</tbody></table></div>;
+}
+
+function CreateShipment({ onCreated, onCancel }: { onCreated: (shipment: Shipment) => void; onCancel: () => void }) {
+  const [form, setForm] = useState({ shipment_reference: "", importer: "", supplier: "", origin_country: "", description: "" }); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  const update = (key: keyof typeof form) => (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setForm((current) => ({ ...current, [key]: event.target.value }));
+  async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { onCreated(await apiFetch<Shipment>("/shipments", { method: "POST", body: JSON.stringify(form) })); } catch (caught) { setError(caught instanceof Error ? caught.message : "Unable to create shipment"); } finally { setBusy(false); } }
+  return <div className="create-page"><button className="back-link" onClick={onCancel}><Icon name="back" size={16} />All shipments</button><div className="form-page-heading"><span className="kicker">New intake</span><h1>Create a shipment</h1><p className="page-intro">Set up the shipment record before documents enter extraction and review.</p></div><form className="panel form-panel" onSubmit={submit}><div className="form-section-title"><span className="step-index">01</span><div><h2>Shipment identity</h2><p>Use the reference your operations team will recognize.</p></div></div><div className="form-grid"><label>Shipment reference<input required placeholder="SHP-2026-001" value={form.shipment_reference} onChange={update("shipment_reference")} /></label><label>Origin country<input required placeholder="Country of dispatch" value={form.origin_country} onChange={update("origin_country")} /></label><label>Importer<input required placeholder="Legal importer name" value={form.importer} onChange={update("importer")} /></label><label>Supplier<input required placeholder="Legal supplier name" value={form.supplier} onChange={update("supplier")} /></label><label className="full-field">Description <span className="optional">Optional</span><textarea rows={4} placeholder="Short context for the operations team" value={form.description} onChange={update("description")} /></label></div>{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="form-actions"><Button type="button" variant="quiet" onClick={onCancel}>Cancel</Button><Button type="submit" variant="primary" disabled={busy}>{busy ? <><span className="spinner spinner-light" />Creating</> : <>Create shipment <Icon name="arrow" size={16} /></>}</Button></div></form></div>;
+}
+
+function ShipmentList({ user, onOpen, onCreate, refreshKey }: { user: User; onOpen: (id: string) => void; onCreate: () => void; refreshKey: number }) {
+  const [status, setStatus] = useState(""); const { data, error, loading } = useShipments(refreshKey, status || undefined);
+  return <div className="page"><div className="hero-row"><div><span className="kicker">Portfolio</span><h1>Shipments</h1><p className="page-intro">Track every document set from intake through export release.</p></div>{user.roles.includes("DOCUMENTATION_EXECUTIVE") && <Button variant="primary" icon="plus" onClick={onCreate}>New shipment</Button>}</div><section className="panel list-panel"><div className="list-toolbar"><div><strong>{data?.total ?? "—"}</strong><span>shipments in scope</span></div><label className="filter-label">Filter by status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option>{statuses.map((value) => <option key={value} value={value}>{shortStatus(value)}</option>)}</select></label></div>{error && <div className="notice notice-error"><Icon name="alert" size={17} />{error}</div>}{loading ? <LoadingState label="Loading shipments" /> : data?.items.length ? <ShipmentTable shipments={data.items} onOpen={onOpen} /> : <EmptyState title="No matching shipments" detail={status ? "Try a different status filter." : "Create a shipment to start your portfolio."} action={!status && user.roles.includes("DOCUMENTATION_EXECUTIVE") ? <Button variant="secondary" icon="plus" onClick={onCreate}>Create shipment</Button> : undefined} />}</section></div>;
+}
+
+function DocumentViewer({ shipmentId, document }: { shipmentId: string; document?: Document }) {
+  const [url, setUrl] = useState(""); const [error, setError] = useState("");
+  useEffect(() => { let active = true; let objectUrl = ""; setUrl(""); setError(""); if (!document) return () => { active = false; }; apiBlob(`/shipments/${shipmentId}/documents/${document.id}/download`).then((blob) => { if (active) { objectUrl = URL.createObjectURL(blob); setUrl(objectUrl); } }).catch((caught) => active && setError(caught instanceof Error ? caught.message : "Unable to load document")); return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); }; }, [shipmentId, document?.id]);
+  if (!document) return <div className="document-viewer viewer-empty"><Icon name="file" size={24} /><span>Select a source document to preview it.</span></div>;
+  return <div className="document-viewer">{error ? <div className="viewer-message"><Icon name="alert" size={17} />{error}</div> : !url ? <LoadingState label="Loading source" /> : document.content_type === "application/pdf" ? <iframe title={document.original_filename} src={url} /> : <img alt={document.original_filename} src={url} />}</div>;
+}
+
+function FieldReviewRow({ field, canEdit, onChanged }: { field: Field; canEdit: boolean; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false); const [value, setValue] = useState(textValue(field.value)); const [note, setNote] = useState(""); const [revisions, setRevisions] = useState<Revision[] | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
   useEffect(() => setValue(textValue(field.value)), [field.value]);
-  const confidence =
-    field.confidence === undefined || field.confidence === null
-      ? "—"
-      : `${Math.round(field.confidence * 100)}%`;
-  async function action(path: string, body: object) {
-    setBusy(true);
-    setError("");
-    try {
-      await apiFetch(`/fields/${field.id}${path}`, {
-        method: path === "" ? "PATCH" : "POST",
-        body: JSON.stringify(body),
-      });
-      setEditing(false);
-      onChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Review action failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function save() {
-    let parsed: unknown = value;
-    if (field.value_type === "number" || field.value_type === "integer")
-      parsed = Number(value);
-    await action("", {
-      value: parsed,
-      note: note || undefined,
-      expected_version: field.version,
-    });
-  }
-  async function showRevisions() {
-    if (revisions) {
-      setRevisions(null);
-      return;
-    }
-    try {
-      setRevisions(await apiFetch<Revision[]>(`/fields/${field.id}/revisions`));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to load revisions");
-    }
-  }
-  return (
-    <div className="field-row">
-      <div className="field-main">
-        <div className="field-label">
-          {prettyPath(field.field_path)}{" "}
-          <span
-            className={`confidence ${field.confidence !== undefined && field.confidence !== null && field.confidence < 0.8 ? "low" : ""}`}
-          >
-            {confidence}
-          </span>
-        </div>
-        {editing ? (
-          <div className="edit-stack">
-            <input value={value} onChange={(e) => setValue(e.target.value)} />
-            <input
-              placeholder="Correction note (optional)"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-            />
-          </div>
-        ) : (
-          <div className="field-value">
-            {textValue(field.value) || <span className="missing">Missing</span>}
-          </div>
-        )}
-        <div className="source-line">
-          {field.source_references.length
-            ? field.source_references
-                .map(
-                  (ref) =>
-                    `p.${ref.page_number}${ref.locator ? ` · ${ref.locator}` : ""}`,
-                )
-                .join("  ")
-            : "No source reference"}
-          {field.extracted_value !== field.value &&
-          field.extracted_value !== undefined
-            ? ` · extracted: ${textValue(field.extracted_value)}`
-            : ""}
-        </div>
-        {field.flags.length > 0 && (
-          <div className="flag-line">
-            {field.flags.map((flag) => (
-              <span key={flag}>{flag.replaceAll("_", " ")}</span>
-            ))}
-          </div>
-        )}
-        {error && <div className="inline-error">{error}</div>}
-      </div>
-      <div className="field-actions">
-        <span className={`review-status ${field.status.toLowerCase()}`}>
-          {field.status}
-        </span>
-        {canEdit && editing ? (
-          <>
-            <button className="mini primary" disabled={busy} onClick={save}>
-              Save
-            </button>
-            <button className="mini" onClick={() => setEditing(false)}>
-              Cancel
-            </button>
-          </>
-        ) : (
-          canEdit && (
-            <button className="mini" onClick={() => setEditing(true)}>
-              Correct
-            </button>
-          )
-        )}
-        {field.status !== "CONFIRMED" && (
-          <button
-            className="mini"
-            disabled={busy}
-            onClick={() =>
-              action("/confirm", { expected_version: field.version })
-            }
-          >
-            Confirm
-          </button>
-        )}
-        {field.status !== "REJECTED" && (
-          <button
-            className="mini danger"
-            disabled={busy}
-            onClick={() =>
-              action("/reject", { expected_version: field.version })
-            }
-          >
-            Reject
-          </button>
-        )}
-        <button className="mini" onClick={showRevisions}>
-          History
-        </button>
-      </div>
-      {revisions && (
-        <div className="revision-list">
-          {revisions.length ? (
-            revisions.map((revision) => (
-              <div key={revision.id}>
-                <strong>{revision.action}</strong> ·{" "}
-                {formatDate(revision.created_at)} ·{" "}
-                {textValue(revision.new_value) || "blank"}
-                {revision.note ? ` · ${revision.note}` : ""}
-              </div>
-            ))
-          ) : (
-            <span className="muted">No revisions recorded.</span>
-          )}
-        </div>
-      )}
-    </div>
-  );
+  const confidence = field.confidence == null ? "No score" : `${Math.round(field.confidence * 100)}%`; const flag = field.flags[0];
+  async function action(path: string, body: object) { setBusy(true); setError(""); try { await apiFetch(`/fields/${field.id}${path}`, { method: path ? "POST" : "PATCH", body: JSON.stringify(body) }); setEditing(false); onChanged(); } catch (caught) { setError(caught instanceof Error ? caught.message : "Review action failed"); } finally { setBusy(false); } }
+  async function save() { let parsed: unknown = value; if (field.value_type === "decimal") parsed = Number(value); if (field.value_type === "integer") parsed = Number.parseInt(value, 10); await action("", { value: parsed, note: note || undefined, expected_version: field.version }); }
+  async function showHistory() { if (revisions) { setRevisions(null); return; } try { setRevisions(await apiFetch<Revision[]>(`/fields/${field.id}/revisions`)); } catch (caught) { setError(caught instanceof Error ? caught.message : "Unable to load history"); } }
+  return <div className="field-review-row"><div className="field-name"><strong>{prettyPath(field.field_path)}</strong><span>{field.value_type}</span></div><div className="field-current">{editing ? <div className="edit-fields"><input autoFocus value={value} onChange={(event) => setValue(event.target.value)} /><input placeholder="Correction note (optional)" value={note} onChange={(event) => setNote(event.target.value)} /></div> : <>{textValue(field.value) || <span className="missing-value">Missing value</span>}{field.extracted_value !== field.value && field.extracted_value !== undefined && <small>Extracted: {textValue(field.extracted_value)}</small>}</>}</div><div className="field-evidence">{field.source_references.length ? field.source_references.map((source, index) => <span key={`${source.page}-${source.locator}-${index}`}><Icon name="file" size={13} />Page {source.page}{source.locator ? ` · ${source.locator}` : ""}</span>) : <span className="muted-cell">No source reference</span>}</div><div className="field-confidence"><strong className={field.confidence != null && field.confidence < 0.8 ? "confidence-low" : ""}>{confidence}</strong>{flag && <span className="field-flag">{flag.replaceAll("_", " ")}</span>}</div><div className="field-status"><StatusBadge status={field.status} compact /></div><div className="field-actions">{canEdit && (editing ? <><Button variant="primary" className="button-small" disabled={busy} onClick={save}>Save</Button><Button variant="quiet" className="button-small" onClick={() => setEditing(false)}>Cancel</Button></> : <Button variant="quiet" className="button-small" onClick={() => setEditing(true)}>Correct</Button>)}{canEdit && field.status !== "CONFIRMED" && <Button variant="secondary" className="button-small" disabled={busy || field.value == null} onClick={() => action("/confirm", { expected_version: field.version })}>Confirm</Button>}{canEdit && field.status !== "REJECTED" && <Button variant="danger" className="button-small" disabled={busy} onClick={() => window.confirm("Reject this field? It will block export until corrected.") && action("/reject", { expected_version: field.version })}>Reject</Button>}<Button variant="quiet" className="button-small icon-button" aria-label="View field history" onClick={showHistory}><Icon name="history" size={15} /></Button></div>{error && <div className="field-error">{error}</div>}{revisions && <div className="revision-drawer">{revisions.length ? revisions.map((revision) => <div key={revision.id}><StatusBadge status={revision.action} compact /><span>{formatDate(revision.created_at)}</span><strong>{textValue(revision.new_value) || "Blank"}</strong>{revision.note && <small>{revision.note}</small>}</div>) : <span className="muted-cell">No revisions recorded.</span>}</div>}</div>;
 }
 
-function ShipmentDetail({
-  user,
-  shipmentId,
-  onBack,
-}: {
-  user: User;
-  shipmentId: string;
-  onBack: () => void;
-}) {
-  const [shipment, setShipment] = useState<Shipment | null>(null);
-  const [documents, setDocuments] = useState<Document[]>([]);
-  const [review, setReview] = useState<Review | null>(null);
-  const [eligibility, setEligibility] = useState<Eligibility | null>(null);
-  const [selected, setSelected] = useState<Document>();
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [uploadFile, setUploadFile] = useState<File>();
-  const [uploadType, setUploadType] = useState("INVOICE");
-  const canEdit = user.roles.includes("DOCUMENTATION_EXECUTIVE");
-  async function load() {
-    setError("");
-    try {
-      const [s, d, r, e] = await Promise.all([
-        apiFetch<Shipment>(`/shipments/${shipmentId}`),
-        apiFetch<{ items: Document[] }>(`/shipments/${shipmentId}/documents`),
-        apiFetch<Review>(`/shipments/${shipmentId}/review`),
-        apiFetch<Eligibility>(`/shipments/${shipmentId}/export-eligibility`),
-      ]);
-      setShipment(s);
-      setDocuments(d.items);
-      setReview(r);
-      setEligibility(e);
-      setSelected(
-        (current) =>
-          d.items.find((item) => item.id === current?.id) || d.items[0],
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to load shipment");
-    }
-  }
-  useEffect(() => {
-    load();
-  }, [shipmentId]);
-  async function upload(event: FormEvent) {
-    event.preventDefault();
-    if (!uploadFile) return;
-    setBusy(true);
-    setError("");
-    const body = new FormData();
-    body.append("document_type", uploadType);
-    body.append("file", uploadFile);
-    try {
-      const doc = await apiFetch<Document>(
-        `/shipments/${shipmentId}/documents`,
-        { method: "POST", body },
-      );
-      await apiFetch(`/shipments/${shipmentId}/documents/${doc.id}/extract`, {
-        method: "POST",
-      });
-      setUploadFile(undefined);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Upload or extraction failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function runExtraction(documentId: string) {
-    setBusy(true);
-    try {
-      await apiFetch(
-        `/shipments/${shipmentId}/documents/${documentId}/extract`,
-        { method: "POST" },
-      );
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Extraction failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function runValidation() {
-    setBusy(true);
-    try {
-      await apiFetch(`/shipments/${shipmentId}/validations/run`, {
-        method: "POST",
-      });
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Validation failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function exportCsv() {
-    setBusy(true);
-    try {
-      const csv = await apiFetch<string>(`/shipments/${shipmentId}/exports`, {
-        method: "POST",
-      });
-      const blob = new Blob([csv], { type: "text/csv" });
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = `${shipment?.shipment_reference || "shipment"}.csv`;
-      link.click();
-      URL.revokeObjectURL(link.href);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Export blocked");
-    } finally {
-      setBusy(false);
-    }
-  }
-  if (!shipment || !review)
-    return <div className="state-card">{error || "Loading shipment…"}</div>;
-  const reviewDocs = review.documents.filter(
-    (doc) => doc.fields.length || documents.some((item) => item.id === doc.id),
-  );
-  return (
-    <>
-      <div className="detail-heading">
-        <button className="text-button" onClick={onBack}>
-          ← All shipments
-        </button>
-        <div className="detail-title">
-          <div>
-            <p className="eyebrow">Shipment {shipment.shipment_reference}</p>
-            <h1>{shipment.importer}</h1>
-            <p className="muted">
-              {shipment.supplier} · {shipment.origin_country} ·{" "}
-              {shipment.status}
-            </p>
-          </div>
-          <div className="actions">
-            {canEdit && (
-              <form className="upload-form" onSubmit={upload}>
-                <select
-                  value={uploadType}
-                  onChange={(e) => setUploadType(e.target.value)}
-                >
-                  <option value="INVOICE">Invoice</option>
-                  <option value="PACKING_LIST">Packing list</option>
-                  <option value="BILL_OF_LADING">Bill of lading</option>
-                </select>
-                <input
-                  type="file"
-                  accept="application/pdf,image/jpeg,image/png"
-                  onChange={(e) => setUploadFile(e.target.files?.[0])}
-                />
-                <button className="secondary" disabled={!uploadFile || busy}>
-                  Upload & extract
-                </button>
-              </form>
-            )}
-            {(user.roles.includes("DOCUMENTATION_MANAGER") || canEdit) && (
-              <button
-                className="secondary"
-                disabled={busy}
-                onClick={runValidation}
-              >
-                Run validation
-              </button>
-            )}
-            {canEdit && (
-              <button
-                className="primary"
-                disabled={busy || !eligibility?.eligible}
-                title={
-                  !eligibility?.eligible ? "Resolve all blockers first" : ""
-                }
-                onClick={exportCsv}
-              >
-                Export verified CSV
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-      {error && <div className="error-banner">{error}</div>}
-      <div className="detail-grid">
-        <section className="panel source-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Source documents</p>
-              <h2>Document viewer</h2>
-            </div>
-          </div>
-          <div className="document-tabs">
-            {documents.length ? (
-              documents.map((doc) => (
-                <button
-                  className={selected?.id === doc.id ? "active" : ""}
-                  key={doc.id}
-                  onClick={() => setSelected(doc)}
-                >
-                  {doc.document_type.replaceAll("_", " ")}
-                  <small>{doc.original_filename}</small>
-                </button>
-              ))
-            ) : (
-              <p className="muted">No documents uploaded.</p>
-            )}
-          </div>
-          <DocumentViewer shipmentId={shipmentId} document={selected} />
-          {selected && (
-            <button
-              className="text-button"
-              onClick={() => runExtraction(selected.id)}
-            >
-              Re-run extraction
-            </button>
-          )}
-        </section>
-        <section className="panel review-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Structured review</p>
-              <h2>Extracted fields</h2>
-            </div>
-            <span className="muted">{roleLabel(user.roles)}</span>
-          </div>
-          {reviewDocs.length ? (
-            reviewDocs.map((doc) => (
-              <div className="review-document" key={doc.id}>
-                <div className="review-doc-heading">
-                  <strong>{doc.document_type.replaceAll("_", " ")}</strong>
-                  <span>
-                    {doc.page_count} page{doc.page_count === 1 ? "" : "s"} ·{" "}
-                    {doc.extraction_status || "not processed"}
-                  </span>
-                </div>
-                {doc.extraction_error_code && (
-                  <div className="error-banner">
-                    {doc.extraction_error_code}
-                  </div>
-                )}
-                {doc.fields.map((field) => (
-                  <FieldRow
-                    key={field.id}
-                    field={field}
-                    canEdit={canEdit}
-                    onChanged={load}
-                  />
-                ))}
-              </div>
-            ))
-          ) : (
-            <div className="state-card">
-              No extracted fields yet. Upload a document and run extraction.
-            </div>
-          )}
-        </section>
-      </div>
-      <div className="bottom-grid">
-        <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Controls</p>
-              <h2>Validation results</h2>
-            </div>
-            <span
-              className={`eligibility ${eligibility?.eligible ? "good" : "blocked"}`}
-            >
-              {eligibility?.eligible ? "Eligible for export" : "Export blocked"}
-            </span>
-          </div>
-          {eligibility && !eligibility.eligible && (
-            <div className="blocker-list">
-              {eligibility.blockers.map((blocker, index) => (
-                <div key={`${blocker.code}-${index}`}>
-                  <strong>{blocker.code.replaceAll("_", " ")}</strong>
-                  <span>
-                    {blocker.message}
-                    {blocker.field_path
-                      ? ` · ${prettyPath(blocker.field_path)}`
-                      : ""}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          {review.validations.length ? (
-            <div className="validation-list">
-              {review.validations.map((validation) => (
-                <div key={validation.id}>
-                  <span
-                    className={`validation-dot ${validation.status.toLowerCase()}`}
-                  />{" "}
-                  <strong>{validation.rule_key.replaceAll("_", " ")}</strong>
-                  <span>{validation.status}</span>
-                  <small>{JSON.stringify(validation.details)}</small>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="muted">
-              Validation has not been run yet. Missing comparisons remain
-              unresolved.
-            </p>
-          )}
-        </section>
-      </div>
-    </>
-  );
+function ValidationCenter({ review, eligibility, busy, onValidate }: { review: Review; eligibility: Eligibility | null; busy: boolean; onValidate: () => void }) {
+  const labels: Record<string, string> = { invoice_total_vs_line_items: "Invoice total vs line items", package_count_across_documents: "Package count across documents", gross_weight_across_documents: "Gross weight across documents", net_weight_across_documents: "Net weight across documents" };
+  return <div className="validation-layout"><section className="panel"><div className="section-heading"><div><span className="kicker">Control checks</span><h2>Cross-document validation</h2><p>Comparisons are evaluated from persisted review values.</p></div><Button variant="secondary" icon="refresh" disabled={busy} onClick={onValidate}>{busy ? "Running" : "Run checks"}</Button></div>{review.validations.length ? <div className="validation-cards">{review.validations.map((validation) => <div className="validation-card" key={validation.id}><div className={`validation-icon validation-${validation.status.toLowerCase()}`}><Icon name={validation.status === "PASSED" ? "check" : validation.status === "FAILED" ? "alert" : "eye"} size={17} /></div><div><strong>{labels[validation.rule_key] || shortStatus(validation.rule_key)}</strong><span>{validation.status === "PASSED" ? "Evidence agrees across the current document set." : validation.status === "FAILED" ? "Resolve the discrepancy before export." : "More evidence is required before this check can pass."}</span><small>{Object.entries(validation.details).map(([key, value]) => `${shortStatus(key)}: ${textValue(value)}`).join(" · ")}</small></div><StatusBadge status={validation.status} compact /></div>)}</div> : <EmptyState title="Checks have not been run" detail="Run validation after confirming the current review values." />}</section><section className="panel eligibility-panel"><div className="section-heading"><div><span className="kicker">Release gate</span><h2>Export eligibility</h2></div>{eligibility && <StatusBadge status={eligibility.eligible ? "EXPORTED" : "ACTION_REQUIRED"} />}</div>{eligibility?.eligible ? <div className="release-ready"><span className="ready-icon"><Icon name="check" size={22} /></span><div><strong>Ready for provisional export</strong><p>All required fields are present, confirmed and supported by passing validation checks.</p></div></div> : <div className="blocker-stack">{eligibility?.blockers.length ? eligibility.blockers.map((blocker, index) => <div className="blocker-row" key={`${blocker.code}-${index}`}><span><Icon name="alert" size={15} /></span><div><strong>{shortStatus(blocker.code)}</strong><small>{blocker.message}{blocker.field_path ? ` · ${prettyPath(blocker.field_path)}` : ""}</small></div></div>) : <p className="muted">Eligibility is not available yet.</p>}</div>}</section></div>;
+}
+
+function Workspace({ user, shipmentId, onBack, notify }: { user: User; shipmentId: string; onBack: () => void; notify: (message: string, tone?: "success" | "error") => void }) {
+  const [shipment, setShipment] = useState<Shipment | null>(null); const [documents, setDocuments] = useState<Document[]>([]); const [review, setReview] = useState<Review | null>(null); const [eligibility, setEligibility] = useState<Eligibility | null>(null); const [selected, setSelected] = useState<Document>(); const [tab, setTab] = useState<"overview" | "review" | "validation">("overview"); const [error, setError] = useState(""); const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [uploadFile, setUploadFile] = useState<File>(); const [uploadType, setUploadType] = useState<DocumentType>("INVOICE"); const canEdit = user.roles.includes("DOCUMENTATION_EXECUTIVE");
+  async function load() { setError(""); try { const [shipmentData, documentData, reviewData, eligibilityData] = await Promise.all([apiFetch<Shipment>(`/shipments/${shipmentId}`), apiFetch<{ items: Document[] }>(`/shipments/${shipmentId}/documents`), apiFetch<Review>(`/shipments/${shipmentId}/review`), apiFetch<Eligibility>(`/shipments/${shipmentId}/export-eligibility`)]); setShipment(shipmentData); setDocuments(documentData.items); setReview(reviewData); setEligibility(eligibilityData); setSelected((current) => documentData.items.find((item) => item.id === current?.id) || documentData.items[0]); } catch (caught) { setError(caught instanceof Error ? caught.message : "Unable to load shipment"); } finally { setLoading(false); } }
+  useEffect(() => { void load(); }, [shipmentId]);
+  async function upload(event: FormEvent) { event.preventDefault(); if (!uploadFile) return; setBusy(true); try { const body = new FormData(); body.append("document_type", uploadType); body.append("file", uploadFile); const document = await apiFetch<Document>(`/shipments/${shipmentId}/documents`, { method: "POST", body }); await apiFetch(`/shipments/${shipmentId}/documents/${document.id}/extract`, { method: "POST" }); setUploadFile(undefined); notify("Document uploaded and extraction completed"); await load(); } catch (caught) { notify(caught instanceof Error ? caught.message : "Upload or extraction failed", "error"); } finally { setBusy(false); } }
+  async function runExtraction(documentId: string) { setBusy(true); try { await apiFetch(`/shipments/${shipmentId}/documents/${documentId}/extract`, { method: "POST" }); notify("Extraction rerun completed"); await load(); } catch (caught) { notify(caught instanceof Error ? caught.message : "Extraction failed", "error"); } finally { setBusy(false); } }
+  async function runValidation() { setBusy(true); try { await apiFetch(`/shipments/${shipmentId}/validations/run`, { method: "POST" }); notify("Validation checks updated"); await load(); } catch (caught) { notify(caught instanceof Error ? caught.message : "Validation failed", "error"); } finally { setBusy(false); } }
+  async function exportCsv() { setBusy(true); try { const csv = await apiFetch<string>(`/shipments/${shipmentId}/exports`, { method: "POST" }); const blob = new Blob([csv], { type: "text/csv" }); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `${shipment?.shipment_reference || "shipment"}.csv`; link.click(); URL.revokeObjectURL(url); notify("CSV export downloaded"); await load(); } catch (caught) { notify(caught instanceof Error ? caught.message : "Export blocked", "error"); } finally { setBusy(false); } }
+  if (loading) return <div className="page"><LoadingState label="Loading shipment workspace" /></div>;
+  if (!shipment || !review) return <div className="page"><div className="notice notice-error"><Icon name="alert" size={17} />{error || "Shipment workspace unavailable"}<Button variant="quiet" onClick={() => void load()}>Retry</Button></div></div>;
+  const fieldCount = review.documents.reduce((total, document) => total + document.fields.length, 0); const confirmedCount = review.documents.reduce((total, document) => total + document.fields.filter((field) => field.status === "CONFIRMED").length, 0);
+  return <div className="page workspace-page"><button className="back-link" onClick={onBack}><Icon name="back" size={16} />All shipments</button><div className="workspace-header"><div><span className="kicker">Shipment workspace</span><div className="workspace-title-row"><h1>{shipment.shipment_reference}</h1><StatusBadge status={shipment.status} /></div><p className="page-intro">{shipment.importer} <span className="separator-dot">•</span> {shipment.supplier} <span className="separator-dot">•</span> {shipment.origin_country}</p></div><div className="workspace-actions"><Button variant="secondary" icon="refresh" disabled={busy || !selected} onClick={() => selected && void runExtraction(selected.id)}>Rerun extraction</Button><Button variant="secondary" icon="check" disabled={busy} onClick={() => void runValidation()}>Run validation</Button><Button variant="primary" icon="download" disabled={busy || !eligibility?.eligible} title={!eligibility?.eligible ? "Resolve export blockers first" : "Download CSV"} onClick={() => void exportCsv()}>Export CSV</Button></div></div><div className="workspace-summary"><div><span>Documents</span><strong>{documents.length}<small>/ 3 expected</small></strong></div><div><span>Review progress</span><strong>{fieldCount ? `${confirmedCount}/${fieldCount}` : "—"}<small>confirmed</small></strong></div><div><span>Validation checks</span><strong>{review.validations.filter((item) => item.status === "PASSED").length}<small>/ {review.validations.length || 4} passed</small></strong></div><div><span>Release gate</span><strong className={eligibility?.eligible ? "text-success" : "text-attention"}>{eligibility?.eligible ? "Ready" : "Blocked"}</strong></div></div><div className="workspace-tabs"><button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>Source documents</button><button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}>Structured review <span>{fieldCount}</span></button><button className={tab === "validation" ? "active" : ""} onClick={() => setTab("validation")}>Validation & export</button></div>{tab === "overview" && <div className="workspace-grid"><section className="panel source-panel"><div className="section-heading"><div><span className="kicker">Source layer</span><h2>Document viewer</h2></div><span className="muted-cell">Authorized preview</span></div><div className="document-tabs">{documents.length ? documents.map((document) => <button className={selected?.id === document.id ? "active" : ""} key={document.id} onClick={() => setSelected(document)}><span>{documentLabels[document.document_type]}</span><small>{document.original_filename}</small></button>) : <span className="muted-cell">No source documents uploaded yet.</span>}</div><DocumentViewer shipmentId={shipmentId} document={selected} />{selected && <div className="viewer-footer"><span>{selected.size_bytes.toLocaleString()} bytes <span className="separator-dot">•</span> uploaded {formatDate(selected.created_at)}</span><Button variant="quiet" icon="refresh" onClick={() => void runExtraction(selected.id)}>Rerun selected</Button></div>}</section><section className="panel intake-panel"><div className="section-heading"><div><span className="kicker">Document intake</span><h2>Add source documents</h2></div></div>{canEdit ? <form className="upload-dropzone" onSubmit={upload}><div className="upload-icon"><Icon name="download" size={22} /></div><strong>{uploadFile ? uploadFile.name : "Choose a document to upload"}</strong><span>PDF, JPEG or PNG · validated server-side</span><div className="upload-controls"><select value={uploadType} onChange={(event) => setUploadType(event.target.value as DocumentType)}><option value="INVOICE">Commercial invoice</option><option value="PACKING_LIST">Packing list</option><option value="BILL_OF_LADING">Bill of lading</option></select><label className="file-picker">Browse<input type="file" accept="application/pdf,image/jpeg,image/png" onChange={(event) => setUploadFile(event.target.files?.[0])} /></label></div><Button type="submit" variant="primary" disabled={!uploadFile || busy}>{busy ? "Uploading" : "Upload and extract"}</Button></form> : <EmptyState title="Manager review access" detail="Documentation executives upload and process source documents." />}</section><section className="panel document-status-panel"><div className="section-heading"><div><span className="kicker">Processing</span><h2>Document status</h2></div></div>{review.documents.length ? <div className="document-status-list">{review.documents.map((document) => <div className="document-status-row" key={document.id}><div className="doc-type-icon"><Icon name="file" size={16} /></div><div><strong>{documentLabels[document.document_type]}</strong><span>{document.page_count} page{document.page_count === 1 ? "" : "s"} <span className="separator-dot">•</span> {document.extraction_error_code || "Extraction record available"}</span></div><StatusBadge status={document.extraction_status || "NOT_PROCESSED"} compact /></div>)}</div> : <p className="muted-cell">Uploaded documents will appear here.</p>}</section></div>}{tab === "review" && <ReviewCenter review={review} canEdit={canEdit} onChanged={() => void load()} />}{tab === "validation" && <ValidationCenter review={review} eligibility={eligibility} busy={busy} onValidate={() => void runValidation()} />}</div>;
+}
+
+function ReviewCenter({ review, canEdit, onChanged }: { review: Review; canEdit: boolean; onChanged: () => void }) {
+  return <div className="review-layout"><div className="review-intro"><div><span className="kicker">Evidence review</span><h2>Structured fields</h2><p>Confirm what is correct, correct what is not, and preserve the source evidence behind every value.</p></div><div className="review-legend"><span><i className="legend-dot legend-green" />Confirmed</span><span><i className="legend-dot legend-amber" />Needs review</span><span><i className="legend-dot legend-red" />Rejected or blocked</span></div></div>{review.documents.length ? review.documents.map((document) => <section className="panel review-section" key={document.id}><div className="section-heading"><div><span className="kicker">{documentLabels[document.document_type]}</span><h2>Extracted fields</h2></div><div className="review-section-meta"><StatusBadge status={document.extraction_status || "NOT_PROCESSED"} compact /><span>{document.page_count} page{document.page_count === 1 ? "" : "s"}</span></div></div>{document.extraction_error_code && <div className="notice notice-error"><Icon name="alert" size={16} />{document.extraction_error_code}</div>}{document.fields.length ? <div className="field-table"><div className="field-table-head"><span>Field</span><span>Current value</span><span>Source evidence</span><span>Confidence</span><span>Status</span><span>Actions</span></div>{document.fields.map((field) => <FieldReviewRow key={field.id} field={field} canEdit={canEdit} onChanged={onChanged} />)}</div> : <EmptyState title="No extracted fields" detail="Run extraction on this document to create a review set." />}</section>) : <EmptyState title="No documents to review" detail="Upload an invoice, packing list or bill of lading first." />}</div>;
 }
 
 function AccuracyReport({ onBack }: { onBack: () => void }) {
-  const [report, setReport] = useState<{
-    field_metrics: AccuracyMetric[];
-    supplier_metrics: AccuracyMetric[];
-  }>();
-  const [error, setError] = useState("");
-  useEffect(() => {
-    apiFetch<typeof report>("/reports/accuracy")
-      .then(setReport)
-      .catch((e) => setError(e.message));
-  }, []);
-  const table = (title: string, metrics: AccuracyMetric[]) => (
-    <section className="panel">
-      <p className="eyebrow">{title}</p>
-      <h2>Accuracy</h2>
-      <div className="metric-table">
-        {metrics.map((metric) => (
-          <div className="metric-row" key={metric.key}>
-            <strong>{metric.key}</strong>
-            <span>{metric.reviewed_count} reviewed</span>
-            <span>{metric.corrected_count} corrected</span>
-            <span>{metric.rejected_count} rejected</span>
-            <b>
-              {metric.accuracy_percent == null
-                ? "—"
-                : `${metric.accuracy_percent.toFixed(1)}%`}
-            </b>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-  return (
-    <>
-      <button className="text-button" onClick={onBack}>
-        ← All shipments
-      </button>
-      <div className="page-heading">
-        <div>
-          <p className="eyebrow">Manager reporting</p>
-          <h1>Accuracy report</h1>
-          <p className="muted">
-            Field and supplier-level outcomes from human review.
-          </p>
-        </div>
-      </div>
-      {error ? (
-        <div className="error-banner">{error}</div>
-      ) : !report ? (
-        <div className="state-card">Loading report…</div>
-      ) : (
-        <div className="report-grid">
-          {table("Field-level", report.field_metrics)}
-          {table("Supplier-level", report.supplier_metrics)}
-        </div>
-      )}
-    </>
-  );
+  const [report, setReport] = useState<{ field_metrics: AccuracyMetric[]; supplier_metrics: AccuracyMetric[] }>(); const [error, setError] = useState("");
+  useEffect(() => { apiFetch<typeof report>("/reports/accuracy").then(setReport).catch((caught) => setError(caught instanceof Error ? caught.message : "Unable to load report")); }, []);
+  const metricTable = (title: string, metrics: AccuracyMetric[]) => <section className="panel report-panel"><div className="section-heading"><div><span className="kicker">{title}</span><h2>Review outcomes</h2></div><span className="muted-cell">Persisted audit data</span></div><div className="metric-report-table"><div className="metric-report-head"><span>Dimension</span><span>Total</span><span>Reviewed</span><span>Corrections</span><span>Unchanged</span></div>{metrics.map((metric) => <div className="metric-report-row" key={metric.key}><strong>{metric.key}</strong><span>{metric.total_count}</span><span>{metric.reviewed_count}</span><span>{metric.corrected_count}</span><strong className="text-success">{metric.unchanged_extraction_rate_percent == null ? "—" : `${metric.unchanged_extraction_rate_percent.toFixed(1)}%`}</strong></div>)}</div></section>;
+  return <div className="page"><button className="back-link" onClick={onBack}><Icon name="back" size={16} />Control tower</button><div className="form-page-heading"><span className="kicker">Manager reporting</span><h1>Accuracy report</h1><p className="page-intro">See how extracted values perform through human review. Every measure comes from persisted review outcomes.</p></div>{error && <div className="notice notice-error"><Icon name="alert" size={17} />{error}</div>}{!report ? error ? null : <LoadingState label="Loading accuracy report" /> : <div className="report-grid">{metricTable("Field-level", report.field_metrics)}{metricTable("Supplier-level", report.supplier_metrics)}</div>}</div>;
 }
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [view, setView] = useState<"list" | "create" | "detail" | "accuracy">(
-    "list",
-  );
-  const [shipmentId, setShipmentId] = useState("");
-  const [booting, setBooting] = useState(true);
-  useEffect(() => {
-    apiFetch<User>("/auth/me")
-      .then(setUser)
-      .catch(() => undefined)
-      .finally(() => setBooting(false));
-  }, []);
-  if (booting) return <div className="loading-screen">Loading ShipmentIQ…</div>;
-  if (!user) return <Login onLogin={setUser} />;
-  async function logout() {
-    await apiFetch("/auth/logout", { method: "POST" });
-    setUser(null);
-    setView("list");
-  }
-  return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <span>SI</span>
-          <div>
-            <strong>ShipmentIQ</strong>
-            <small>Control tower</small>
-          </div>
-        </div>
-        <div className="side-note">
-          <span className="live-dot" />
-          Authenticated workspace
-        </div>
-        <div className="sidebar-footer">
-          <span>{user.email}</span>
-          <small>{roleLabel(user.roles)}</small>
-          <button className="text-button light" onClick={logout}>
-            Sign out
-          </button>
-        </div>
-      </aside>
-      <main className="content">
-        <header className="topbar">
-          <span>Documentation operations</span>
-          <span className="date-stamp">
-            {new Date().toLocaleDateString(undefined, { dateStyle: "long" })}
-          </span>
-        </header>
-        {view === "list" && (
-          <ShipmentList
-            user={user}
-            onOpen={(id) => {
-              setShipmentId(id);
-              setView("detail");
-            }}
-            onCreate={() => setView("create")}
-            onAccuracy={() => setView("accuracy")}
-          />
-        )}
-        {view === "create" && (
-          <CreateShipment
-            onCancel={() => setView("list")}
-            onCreated={(shipment) => {
-              setShipmentId(shipment.id);
-              setView("detail");
-            }}
-          />
-        )}
-        {view === "detail" && (
-          <ShipmentDetail
-            user={user}
-            shipmentId={shipmentId}
-            onBack={() => setView("list")}
-          />
-        )}
-        {view === "accuracy" && (
-          <AccuracyReport onBack={() => setView("list")} />
-        )}
-      </main>
-    </div>
-  );
+  const [user, setUser] = useState<User | null>(null); const [screen, setScreen] = useState<Screen>("tower"); const [shipmentId, setShipmentId] = useState(""); const [refreshKey, setRefreshKey] = useState(0); const [booting, setBooting] = useState(true); const [createOpen, setCreateOpen] = useState(false); const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
+  useEffect(() => { const handleExpired = () => { setUser(null); setScreen("tower"); setShipmentId(""); setToast({ message: "Your session has expired. Please sign in again.", tone: "error" }); }; window.addEventListener("shipmentiq:session-expired", handleExpired); apiFetch<User>("/auth/me").then(setUser).catch(() => undefined).finally(() => setBooting(false)); return () => window.removeEventListener("shipmentiq:session-expired", handleExpired); }, []);
+  const notify = (message: string, tone: "success" | "error" = "success") => { setToast({ message, tone }); window.setTimeout(() => setToast(null), 4200); };
+  async function logout() { try { await apiFetch("/auth/logout", { method: "POST" }); } catch { /* session is already unusable */ } setUser(null); setScreen("tower"); }
+  if (booting) return <div className="loading-page"><span className="brand-symbol">SI</span><LoadingState label="Starting secure workspace" /></div>;
+  if (!user) return <><Login onLogin={(nextUser) => { setUser(nextUser); setToast(null); }} /><Toast toast={toast} onClose={() => setToast(null)} /></>;
+  const openShipment = (id: string) => { if (!id) return; setShipmentId(id); setScreen("workspace"); };
+  return <><Shell user={user} screen={screen} setScreen={setScreen} onLogout={() => void logout()}><>{screen === "tower" && <ControlTower user={user} onOpenShipment={openShipment} onCreate={() => setCreateOpen(true)} onRetry={() => setRefreshKey((current) => current + 1)} />}{screen === "shipments" && <ShipmentList user={user} onOpen={openShipment} onCreate={() => setCreateOpen(true)} refreshKey={refreshKey} />}{screen === "workspace" && shipmentId && <Workspace user={user} shipmentId={shipmentId} onBack={() => setScreen("shipments")} notify={notify} />}{screen === "report" && <AccuracyReport onBack={() => setScreen("tower")} />}</></Shell>{createOpen && <div className="modal-backdrop" role="presentation"><div className="modal-card"><button className="modal-close" aria-label="Close create shipment" onClick={() => setCreateOpen(false)}><Icon name="close" /></button><CreateShipment onCancel={() => setCreateOpen(false)} onCreated={(shipment) => { setCreateOpen(false); setShipmentId(shipment.id); setScreen("workspace"); notify("Shipment created"); }} /></div></div>}<Toast toast={toast} onClose={() => setToast(null)} /></>;
 }

@@ -56,6 +56,18 @@ export type Blocker = {
   document_id?: string;
 };
 
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 let csrfTokenValue: string | undefined;
 
 export function clearCsrfToken(): void {
@@ -112,8 +124,13 @@ export async function apiFetch<T>(
     } catch {
       /* non-JSON error */
     }
-    throw new Error(
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("shipmentiq:session-expired"));
+    }
+    throw new ApiRequestError(
       payload?.error?.message || `Request failed (${response.status})`,
+      response.status,
+      payload?.error?.code,
     );
   }
   if (path === "/auth/logout") clearCsrfToken();
